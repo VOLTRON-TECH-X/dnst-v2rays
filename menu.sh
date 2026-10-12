@@ -1,7 +1,7 @@
 #!/bin/bash
 # ================================================================
-# DNSTT + V2RAY (XRAY) BACKEND — COMPLETE EDITION
-# V2Ray users, trial, banner, limiter (Xray Stats API), boosters 7
+# DNSTT + V2RAY (XRAY) BACKEND — COMPLETE
+# V2Ray users, limiter, banner, speed boosters 7, dashboard
 # ================================================================
 
 C_RESET=$'\033[0m'; C_BOLD=$'\033[1m'; C_DIM=$'\033[2m'; C_UL=$'\033[4m'
@@ -112,129 +112,6 @@ get_bar_color() {
     elif (( pct >= 50 )); then echo "\033[38;5;226m"
     else                        echo "\033[38;5;46m"
     fi
-}
-
-# ============================================================
-# SELECT USER INTERFACES
-# ============================================================
-_select_v2ray_user_interface() {
-    local title="$1"
-    clear; show_banner
-    echo -e "${C_BOLD}${C_PURPLE}${title}${C_RESET}\n"
-    if [[ ! -s "$V2RAY_USERS_DB" ]]; then
-        echo -e "${C_YELLOW}ℹ️  No users.${C_RESET}"
-        SELECTED_USER="NO_USERS"
-        return
-    fi
-    mapfile -t all_users < <(cut -d: -f1 "$V2RAY_USERS_DB" | sort)
-    if [ ${#all_users[@]} -ge 15 ]; then
-        read -p "👉 Search: " st
-        if [[ -n "$st" ]]; then
-            mapfile -t users < <(printf "%s\n" "${all_users[@]}" | grep -i "$st")
-        else
-            users=("${all_users[@]}")
-        fi
-    else
-        users=("${all_users[@]}")
-    fi
-    if [ ${#users[@]} -eq 0 ]; then
-        echo -e "\n${C_YELLOW}ℹ️  None.${C_RESET}"
-        SELECTED_USER="NO_USERS"
-        return
-    fi
-    echo -e "\nSelect user:\n"
-    for i in "${!users[@]}"; do
-        printf "  ${C_GREEN}[%2d]${C_RESET} %s\n" "$((i+1))" "${users[$i]}"
-    done
-    echo -e "\n  ${C_RED}[ 0]${C_RESET} Cancel"
-    while true; do
-        read -p "👉 Number: " c
-        if [[ "$c" =~ ^[0-9]+$ ]] && [ "$c" -ge 0 ] && [ "$c" -le "${#users[@]}" ]; then
-            if [ "$c" -eq 0 ]; then
-                SELECTED_USER=""
-                return
-            else
-                SELECTED_USER="${users[$((c-1))]}"
-                return
-            fi
-        else
-            echo -e "${C_RED}❌ Invalid.${C_RESET}"
-        fi
-    done
-}
-
-_select_multi_v2ray_user_interface() {
-    local title="$1"
-    clear; show_banner
-    echo -e "${C_BOLD}${C_PURPLE}${title}${C_RESET}\n"
-    SELECTED_USERS=()
-    if [[ ! -s "$V2RAY_USERS_DB" ]]; then
-        echo -e "${C_YELLOW}ℹ️  No users.${C_RESET}"
-        SELECTED_USERS=("NO_USERS")
-        return
-    fi
-    mapfile -t all_users < <(cut -d: -f1 "$V2RAY_USERS_DB" | sort)
-    if [ ${#all_users[@]} -ge 15 ]; then
-        read -p "👉 Search: " st
-        if [[ -n "$st" ]]; then
-            mapfile -t users < <(printf "%s\n" "${all_users[@]}" | grep -i "$st")
-        else
-            users=("${all_users[@]}")
-        fi
-    else
-        users=("${all_users[@]}")
-    fi
-    if [ ${#users[@]} -eq 0 ]; then
-        echo -e "\n${C_YELLOW}ℹ️  None.${C_RESET}"
-        SELECTED_USERS=("NO_USERS")
-        return
-    fi
-    echo -e "\nSelect users:\n"
-    for i in "${!users[@]}"; do
-        printf "  ${C_GREEN}[%2d]${C_RESET} %s\n" "$((i+1))" "${users[$i]}"
-    done
-    echo -e "\n  ${C_GREEN}[all]${C_RESET} Select ALL   ${C_RED}[ 0]${C_RESET} Cancel"
-    while true; do
-        read -p "👉 Numbers: " c
-        c=$(echo "$c" | tr ',' ' ')
-        if [[ -z "$c" ]]; then echo -e "${C_RED}❌ Invalid.${C_RESET}"; continue; fi
-        if [[ "$c" == "0" ]]; then SELECTED_USERS=(); return; fi
-        if [[ "${c,,}" == "all" ]]; then SELECTED_USERS=("${users[@]}"); return; fi
-        local valid=true; local si=()
-        for t in $c; do
-            if [[ "$t" =~ ^[0-9]+-[0-9]+$ ]]; then
-                local s=${t%-*}; local e=${t#*-}
-                if [ "$s" -le "$e" ]; then
-                    for (( i=s; i<=e; i++ )); do
-                        if [ "$i" -ge 1 ] && [ "$i" -le "${#users[@]}" ]; then
-                            si+=($i)
-                        else
-                            valid=false; break
-                        fi
-                    done
-                else
-                    valid=false; break
-                fi
-            elif [[ "$t" =~ ^[0-9]+$ ]]; then
-                if [ "$t" -ge 1 ] && [ "$t" -le "${#users[@]}" ]; then
-                    si+=($t)
-                else
-                    valid=false; break
-                fi
-            else
-                valid=false; break
-            fi
-        done
-        if [[ "$valid" == true && ${#si[@]} -gt 0 ]]; then
-            mapfile -t ui < <(printf "%s\n" "${si[@]}" | sort -u -n)
-            for i in "${ui[@]}"; do
-                SELECTED_USERS+=("${users[$((i-1))]}")
-            done
-            return
-        else
-            echo -e "${C_RED}❌ Invalid.${C_RESET}"
-        fi
-    done
 }
 
 # ============================================================
@@ -797,7 +674,7 @@ get_v2ray_user() {
     grep "^${1}:" "$V2RAY_USERS_DB" 2>/dev/null
 }
 
-# ============ STATUS (FIXED — jina tofauti ili kuepuka conflict) ============
+# ============ STATUS (FIXED — jina tofauti) ============
 get_v2ray_status() {
     local user="$1"
     local line=$(get_v2ray_user "$user")
@@ -810,13 +687,11 @@ get_v2ray_status() {
     local traffic=$(echo "$line" | cut -d: -f6)
     local account_status=$(echo "$line" | cut -d: -f7)
 
-    # LOCKED kwanza
     if [[ "$account_status" == "LOCKED" ]]; then
         echo "LOCKED"
         return
     fi
 
-    # EXPIRED
     local et=$(date -d "$expiry" +%s 2>/dev/null || echo 0)
     local now=$(date +%s)
     if [[ $et -gt 0 && $et -lt $now ]]; then
@@ -824,7 +699,6 @@ get_v2ray_status() {
         return
     fi
 
-    # EXHAUSTED
     if [[ "$bw" != "0" && -n "$bw" ]]; then
         local qb=$(awk "BEGIN{printf \"%.0f\", $bw*1073741824}")
         local ub=$(awk "BEGIN{printf \"%.0f\", $traffic*1073741824}" 2>/dev/null || echo 0)
@@ -847,9 +721,7 @@ get_v2ray_days_left() {
     echo $(( (et - now) / 86400 ))
 }
 
-# ============================================================
-# CREATE V2RAY USER
-# ============================================================
+# ============ CREATE ============
 create_v2ray_user() {
     clear; show_banner
     echo -e "${C_BOLD}${C_PURPLE}--- ✨ Create V2Ray User ---${C_RESET}\n"
@@ -907,9 +779,7 @@ create_v2ray_user() {
     press_enter
 }
 
-# ============================================================
-# DELETE V2RAY USER
-# ============================================================
+# ============ DELETE ============
 delete_v2ray_user() {
     clear; show_banner
     echo -e "${C_BOLD}${C_PURPLE}--- 🗑️  Delete V2Ray User ---${C_RESET}\n"
@@ -955,9 +825,7 @@ delete_v2ray_user() {
     press_enter
 }
 
-# ============================================================
-# EDIT V2RAY USER
-# ============================================================
+# ============ EDIT ============
 edit_v2ray_user() {
     clear; show_banner
     echo -e "${C_BOLD}${C_PURPLE}--- ✏️  Edit V2Ray User ---${C_RESET}\n"
@@ -1040,9 +908,7 @@ edit_v2ray_user() {
     done
 }
 
-# ============================================================
-# LIST V2RAY USERS (na BANDWIDTH BAR)
-# ============================================================
+# ============ LIST (FIXED — echo -e, sio printf) ============
 list_v2ray_users() {
     clear; show_banner
     echo -e "${C_BOLD}${C_PURPLE}═══ 📋 V2RAY USERS LIST ═══${C_RESET}\n"
@@ -1056,7 +922,6 @@ list_v2ray_users() {
         [[ -z "$user" || "$user" == \#* ]] && continue
         ((total++))
 
-        # ============ BANDWIDTH BAR ============
         local ub=0
         [[ -f "$BANDWIDTH_DIR/v2ray_${user}.usage" ]] && ub=$(cat "$BANDWIDTH_DIR/v2ray_${user}.usage" 2>/dev/null | tr -d '[:space:]')
         [[ ! "$ub" =~ ^[0-9]+$ ]] && ub=0
@@ -1078,29 +943,27 @@ list_v2ray_users() {
             bw_display="${color}${bar}${C_RESET} ${pct}% | ${used_disp}/${limit_disp}"
         fi
 
-        # ============ STATUS ============
         local st=$(get_v2ray_status "$user")
         local st_display=""; local st_color=""
         case "$st" in
-            ACTIVE)    st_display="✅ ACTIVE"; st_color="$C_GREEN" ;;
-            LOCKED)    st_display="🔒 LOCKED"; st_color="$C_RED" ;;
-            EXPIRED)   st_display="🗓️ EXPIRED"; st_color="$C_ORANGE" ;;
-            EXHAUSTED) st_display="📦 EXHAUSTED"; st_color="$C_ORANGE" ;;
-            *)         st_display="❓ UNKNOWN"; st_color="$C_GRAY" ;;
+            ACTIVE)    st_display="ACTIVE ✅"; st_color="$C_GREEN" ;;
+            LOCKED)    st_display="LOCKED 🔒"; st_color="$C_RED" ;;
+            EXPIRED)   st_display="EXPIRED 🗓️"; st_color="$C_ORANGE" ;;
+            EXHAUSTED) st_display="EXHAUSTED 📦"; st_color="$C_ORANGE" ;;
+            *)         st_display="UNKNOWN ❓"; st_color="$C_GRAY" ;;
         esac
 
-        # ============ DAYS LEFT ============
         local dl=$(get_v2ray_days_left "$user")
         local dl_display="${dl} days"
         [[ $dl -lt 0 ]] && dl_display="expired"
-        [[ $dl -eq 0 ]] && dl_display="today"
+        [[ $dl -eq 0 ]] && dl_display="TODAY (expires)"
 
         echo -e "${C_CYAN}┌─────────────────────────────────────────────────────────────┐${C_RESET}"
-        printf "${C_CYAN}│${C_RESET} USER:   ${C_WHITE}%-51s${C_CYAN}│${C_RESET}\n" "$user"
-        printf "${C_CYAN}│${C_RESET} UUID:   ${C_WHITE}%-51s${C_CYAN}│${C_RESET}\n" "$uuid"
-        printf "${C_CYAN}│${C_RESET} EXPIRY: ${C_WHITE}%-51s${C_CYAN}│${C_RESET}\n" "$expiry ($dl_display)"
-        printf "${C_CYAN}│${C_RESET} BW:     %-51b${C_CYAN}│${C_RESET}\n" "$bw_display"
-        printf "${C_CYAN}│${C_RESET} STATUS: ${st_color}%-51s${C_RESET}${C_CYAN}│${C_RESET}\n" "$st_display"
+        echo -e "${C_CYAN}│${C_RESET} USER:   ${C_WHITE}${user}${C_RESET}"
+        echo -e "${C_CYAN}│${C_RESET} UUID:   ${C_WHITE}${uuid}${C_RESET}"
+        echo -e "${C_CYAN}│${C_RESET} EXPIRY: ${C_WHITE}${expiry} (${dl_display})${C_RESET}"
+        echo -e "${C_CYAN}│${C_RESET} BW:     ${bw_display}"
+        echo -e "${C_CYAN}│${C_RESET} STATUS: ${st_color}${st_display}${C_RESET}"
         echo -e "${C_CYAN}└─────────────────────────────────────────────────────────────┘${C_RESET}"
     done < "$V2RAY_USERS_DB"
 
@@ -1108,9 +971,7 @@ list_v2ray_users() {
     press_enter
 }
 
-# ============================================================
-# LOCK V2RAY USER
-# ============================================================
+# ============ LOCK ============
 lock_v2ray_user() {
     clear; show_banner
     echo -e "${C_BOLD}${C_PURPLE}--- 🔒 Lock V2Ray User ---${C_RESET}\n"
@@ -1146,9 +1007,7 @@ lock_v2ray_user() {
     press_enter
 }
 
-# ============================================================
-# UNLOCK V2RAY USER
-# ============================================================
+# ============ UNLOCK ============
 unlock_v2ray_user() {
     clear; show_banner
     echo -e "${C_BOLD}${C_PURPLE}--- 🔓 Unlock V2Ray User ---${C_RESET}\n"
@@ -1184,9 +1043,7 @@ unlock_v2ray_user() {
     press_enter
 }
 
-# ============================================================
-# RENEW V2RAY USER
-# ============================================================
+# ============ RENEW ============
 renew_v2ray_user() {
     clear; show_banner
     echo -e "${C_BOLD}${C_PURPLE}--- 🔄 Renew V2Ray User ---${C_RESET}\n"
@@ -1233,9 +1090,7 @@ renew_v2ray_user() {
     press_enter
 }
 
-# ============================================================
-# CLEANUP EXPIRED V2RAY USERS
-# ============================================================
+# ============ CLEANUP ============
 cleanup_expired_v2ray() {
     clear; show_banner
     echo -e "${C_BOLD}${C_PURPLE}--- 🧹 Cleanup Expired V2Ray Users ---${C_RESET}\n"
@@ -1266,9 +1121,7 @@ cleanup_expired_v2ray() {
     press_enter
 }
 
-# ============================================================
-# BULK CREATE V2RAY USERS
-# ============================================================
+# ============ BULK CREATE ============
 bulk_create_v2ray() {
     clear; show_banner
     echo -e "${C_BOLD}${C_PURPLE}--- 📦 Bulk Create V2Ray Users ---${C_RESET}\n"
@@ -1301,9 +1154,7 @@ bulk_create_v2ray() {
     press_enter
 }
 
-# ============================================================
-# VIEW V2RAY BANDWIDTH (WIMA — box kwa kila user)
-# ============================================================
+# ============ VIEW BANDWIDTH (WIMA — box kwa kila user) ============
 view_v2ray_bandwidth() {
     clear; show_banner
     echo -e "${C_BOLD}${C_PURPLE}--- 📊 V2Ray Bandwidth ---${C_RESET}\n"
@@ -1343,11 +1194,11 @@ view_v2ray_bandwidth() {
         local st=$(get_v2ray_status "$user")
         local st_display=""
         case "$st" in
-            ACTIVE)    st_display="${C_GREEN}✅ ACTIVE${C_RESET}" ;;
-            LOCKED)    st_display="${C_RED}🔒 LOCKED${C_RESET}" ;;
-            EXPIRED)   st_display="${C_ORANGE}🗓️ EXPIRED${C_RESET}" ;;
-            EXHAUSTED) st_display="${C_ORANGE}📦 EXHAUSTED${C_RESET}" ;;
-            *)         st_display="${C_GRAY}❓ UNKNOWN${C_RESET}" ;;
+            ACTIVE)    st_display="${C_GREEN}ACTIVE ✅${C_RESET}" ;;
+            LOCKED)    st_display="${C_RED}LOCKED 🔒${C_RESET}" ;;
+            EXPIRED)   st_display="${C_ORANGE}EXPIRED 🗓️${C_RESET}" ;;
+            EXHAUSTED) st_display="${C_ORANGE}EXHAUSTED 📦${C_RESET}" ;;
+            *)         st_display="${C_GRAY}UNKNOWN ❓${C_RESET}" ;;
         esac
 
         echo -e "${C_CYAN}┌─────────────────────────────────────────────────────────────┐${C_RESET}"
@@ -1361,9 +1212,7 @@ view_v2ray_bandwidth() {
     press_enter
 }
 
-# ============================================================
-# SHOW V2RAY CLIENT CONFIG
-# ============================================================
+# ============ CLIENT CONFIG ============
 show_v2ray_client_config() {
     clear; show_banner
     echo -e "${C_BOLD}${C_PURPLE}--- 📱 V2Ray Client Config ---${C_RESET}\n"
@@ -1479,12 +1328,7 @@ create_trial_v2ray() {
         5) duration_hours=12; duration_label="12 Hours" ;;
         6) duration_hours=24; duration_label="1 Day" ;;
         7) duration_hours=72; duration_label="3 Days" ;;
-        8)
-            read -p "Hours: " ch
-            [[ ! "$ch" =~ ^[0-9]+$ ]] && return
-            duration_hours=$ch
-            duration_label="$ch Hours"
-            ;;
+        8) read -p "Hours: " ch; [[ ! "$ch" =~ ^[0-9]+$ ]] && return; duration_hours=$ch; duration_label="$ch Hours" ;;
         0) return ;;
         *) return ;;
     esac
@@ -1610,11 +1454,11 @@ generate_v2ray_banner() {
     local st=$(get_v2ray_status "$username")
     local st_display=""; local st_color=""
     case "$st" in
-        ACTIVE)    st_display="✅ ACTIVE"; st_color="#6BCB77" ;;
-        LOCKED)    st_display="🔒 LOCKED"; st_color="#FF6B6B" ;;
-        EXPIRED)   st_display="🗓️ EXPIRED"; st_color="#FF9F43" ;;
-        EXHAUSTED) st_display="📦 EXHAUSTED"; st_color="#FF9F43" ;;
-        *)         st_display="❓ UNKNOWN"; st_color="#888888" ;;
+        ACTIVE)    st_display="ACTIVE ✅"; st_color="#6BCB77" ;;
+        LOCKED)    st_display="LOCKED 🔒"; st_color="#FF6B6B" ;;
+        EXPIRED)   st_display="EXPIRED 🗓️"; st_color="#FF9F43" ;;
+        EXHAUSTED) st_display="EXHAUSTED 📦"; st_color="#FF9F43" ;;
+        *)         st_display="UNKNOWN ❓"; st_color="#888888" ;;
     esac
 
     "$BANNER_BUILDER" "$username" "$expiry" "$bw" "$st_display" "$st_color" "$traffic" > "$BANNER_DIR/v2ray_${username}.txt" 2>/dev/null
@@ -1646,9 +1490,7 @@ v2ray_banner_menu() {
                     generate_v2ray_banner "$user" "$expiry" "$bw" "$traffic"
                 done < "$V2RAY_USERS_DB"
                 echo -e "${C_GREEN}✅ Enabled${C_RESET}"; press_enter ;;
-            2)
-                rm -f "$BANNER_ENABLED_FILE"
-                echo -e "${C_GREEN}✅ Disabled${C_RESET}"; press_enter ;;
+            2) rm -f "$BANNER_ENABLED_FILE"; echo -e "${C_GREEN}✅ Disabled${C_RESET}"; press_enter ;;
             3)
                 create_v2ray_banner_builder
                 while IFS=: read -r user uuid expiry limit bw traffic status; do
@@ -1668,7 +1510,7 @@ v2ray_banner_menu() {
 }
 
 # ============================================================
-# V2RAY LIMITER (Xray Stats API — email-based)
+# V2RAY LIMITER (FIXED — Wants= badala ya Requires=)
 # ============================================================
 create_v2ray_limiter() {
     cat > "$V2RAY_LIMITER_SCRIPT" <<'LIMEOF'
@@ -1687,12 +1529,16 @@ mkdir -p "$BW_DIR"
 
 while true; do
     [[ ! -s "$DB_FILE" ]] && { sleep $SCAN; continue; }
-    dirty=0
+
+    # Kagua Xray API inafanya kazi
+    if ! ss -tlnp 2>/dev/null | grep -q "127.0.0.1:10085"; then
+        sleep $SCAN
+        continue
+    fi
 
     while IFS=: read -r user uuid expiry limit bw traffic status; do
         [[ -z "$user" || "$user" == \#* ]] && continue
 
-        # ============ PATA STATS KWA EMAIL ============
         local email="${user}@dnstt"
 
         local uplink=$("$XRAY_BIN" api statsquery --server=$XRAY_API \
@@ -1708,47 +1554,32 @@ while true; do
         local total=$((uplink + downlink))
         local total_gb=$(awk "BEGIN{printf \"%.4f\", $total/1073741824}")
 
-        # ============ UPDATE DATABASE ============
         awk -F: -v u="$user" -v t="$total_gb" \
             'BEGIN{OFS=":"} $1==u{$6=t}1' "$DB_FILE" > "$DB_FILE.tmp" && \
             mv "$DB_FILE.tmp" "$DB_FILE"
 
         printf "%s\n" "$total" > "$BW_DIR/v2ray_${user}.usage"
 
-        # ============ KAGUA BANDWIDTH ============
         if [[ "$bw" != "0" && -n "$bw" ]]; then
             local qb=$(awk "BEGIN{printf \"%.0f\", $bw*1073741824}")
-            if (( total >= qb )); then
-                if [[ "$status" != "EXHAUSTED" ]]; then
-                    awk -F: -v u="$user" \
-                        'BEGIN{OFS=":"} $1==u{$7="EXHAUSTED"}1' "$DB_FILE" > "$DB_FILE.tmp" && \
-                        mv "$DB_FILE.tmp" "$DB_FILE"
-                    dirty=1
-                fi
-            fi
-        fi
-
-        # ============ KAGUA EXPIRY ============
-        local et=$(date -d "$expiry" +%s 2>/dev/null || echo 0)
-        if [[ $et -gt 0 && $et -lt $(date +%s) ]]; then
-            if [[ "$status" != "EXPIRED" ]]; then
+            if (( total >= qb )) && [[ "$status" != "EXHAUSTED" ]]; then
                 awk -F: -v u="$user" \
-                    'BEGIN{OFS=":"} $1==u{$7="EXPIRED"}1' "$DB_FILE" > "$DB_FILE.tmp" && \
+                    'BEGIN{OFS=":"} $1==u{$7="EXHAUSTED"}1' "$DB_FILE" > "$DB_FILE.tmp" && \
                     mv "$DB_FILE.tmp" "$DB_FILE"
-                dirty=1
             fi
         fi
 
-        # ============ UPDATE BANNER ============
+        local et=$(date -d "$expiry" +%s 2>/dev/null || echo 0)
+        if [[ $et -gt 0 && $et -lt $(date +%s) ]] && [[ "$status" != "EXPIRED" ]]; then
+            awk -F: -v u="$user" \
+                'BEGIN{OFS=":"} $1==u{$7="EXPIRED"}1' "$DB_FILE" > "$DB_FILE.tmp" && \
+                mv "$DB_FILE.tmp" "$DB_FILE"
+        fi
+
         if [[ -f "$BANNER_ENABLED" && -x "$BANNER_BUILDER" ]]; then
             "$BANNER_BUILDER" "$user" "$expiry" "$bw" "$status" "$dirty" "$total_gb" > "/etc/dnstt-v2ray/banners/v2ray_${user}.txt" 2>/dev/null
         fi
     done < "$DB_FILE"
-
-    # ============ RELOAD V2RAY KAMA CONFIG IMEBADILIKA ============
-    if [[ $dirty -eq 1 ]]; then
-        touch "$CONFIG_DIRTY"
-    fi
 
     sleep $SCAN
 done
@@ -1759,7 +1590,7 @@ LIMEOF
 [Unit]
 Description=V2Ray Limiter (Xray Stats API)
 After=network.target v2ray-dnstt.service
-Requires=v2ray-dnstt.service
+Wants=v2ray-dnstt.service
 
 [Service]
 Type=simple
@@ -1890,7 +1721,7 @@ create_dnstt_service() {
 [Unit]
 Description=DNSTT Server (V2Ray Backend)
 After=network.target v2ray-dnstt.service
-Requires=v2ray-dnstt.service
+Wants=v2ray-dnstt.service
 
 [Service]
 Type=simple
@@ -1962,11 +1793,7 @@ install_dnstt() {
     download_dnstt_binary
 
     echo -e "${C_BLUE}[3/6] V2Ray backend setup...${C_RESET}"
-    setup_v2ray_backend || {
-        echo -e "${C_RED}❌ V2Ray ni lazima.${C_RESET}"
-        press_enter
-        return 1
-    }
+    setup_v2ray_backend || { echo -e "${C_RED}❌ V2Ray ni lazima.${C_RESET}"; press_enter; return 1; }
 
     echo -e "${C_BLUE}[4/6] MTU selection...${C_RESET}"
     mtu_selection_during_install
@@ -2004,7 +1831,7 @@ uninstall_dnstt() {
 }
 
 # ============================================================
-# DNSTT MAIN MENU
+# DNSTT MENUS
 # ============================================================
 dnstt_main_menu() {
     while true; do
