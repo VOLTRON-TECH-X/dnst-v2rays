@@ -1,7 +1,16 @@
 #!/bin/bash
 # ================================================================
-# DNSTT + V2RAY (XRAY) BACKEND — COMPLETE
-# V2Ray users, limiter, banner, speed boosters 7, dashboard
+# DNSTT + V2RAY (XRAY) BACKEND — COMPLETE EDITION (Voltron Limiter)
+# ================================================================
+# Changelog:
+#   + Limiter ported from VOLTRON v10.18 (status priority, log, lock, trap)
+#   + Auto-rebuild Xray config on dirty (LOCKED/EXPIRED/EXHAUSTED)
+#   + Bandwidth from Xray Stats API (email-based)
+#   + Sessions from established Xray connections
+#   + Progress bar with smart size formatter
+#   + Dynamic banner (cmp -s to avoid writes)
+#   + Full logging + lock file
+#   + Speed Boosters 7 levels
 # ================================================================
 
 C_RESET=$'\033[0m'; C_BOLD=$'\033[1m'; C_DIM=$'\033[2m'; C_UL=$'\033[4m'
@@ -35,7 +44,6 @@ V2RAY_BIN="/usr/local/bin/xray"
 V2RAY_CONFIG_DIR="$DB_DIR/v2ray"
 V2RAY_CONFIG_FILE="$V2RAY_CONFIG_DIR/config.json"
 V2RAY_INFO_FILE="$DB_DIR/v2ray_info.conf"
-V2RAY_UUID_FILE="$V2RAY_CONFIG_DIR/uuid.txt"
 V2RAY_PORT="10086"
 V2RAY_PROTOCOL="vless"
 V2RAY_STATS_PORT="10085"
@@ -107,15 +115,137 @@ build_bar() {
 get_bar_color() {
     local pct=$1
     if   (( pct >= 95 )); then echo "\033[38;5;196m"
-    elif (( pct >= 85 )); then echo "\033[38;5;196m"
-    elif (( pct >= 70 )); then echo "\033[38;5;208m"
-    elif (( pct >= 50 )); then echo "\033[38;5;226m"
+    elif (( pct >= 80 )); then echo "\033[38;5;208m"
+    elif (( pct >= 60 )); then echo "\033[38;5;226m"
     else                        echo "\033[38;5;46m"
     fi
 }
 
 # ============================================================
-# SPEED BOOSTERS — 7 LEVELS
+# SELECT USER INTERFACES
+# ============================================================
+_select_v2ray_user_interface() {
+    local title="$1"
+    clear; show_banner
+    echo -e "${C_BOLD}${C_PURPLE}${title}${C_RESET}\n"
+    if [[ ! -s "$V2RAY_USERS_DB" ]]; then
+        echo -e "${C_YELLOW}ℹ️  No users.${C_RESET}"
+        SELECTED_USER="NO_USERS"
+        return
+    fi
+    mapfile -t all_users < <(cut -d: -f1 "$V2RAY_USERS_DB" | sort)
+    if [ ${#all_users[@]} -ge 15 ]; then
+        read -p "👉 Search: " st
+        if [[ -n "$st" ]]; then
+            mapfile -t users < <(printf "%s\n" "${all_users[@]}" | grep -i "$st")
+        else
+            users=("${all_users[@]}")
+        fi
+    else
+        users=("${all_users[@]}")
+    fi
+    if [ ${#users[@]} -eq 0 ]; then
+        echo -e "\n${C_YELLOW}ℹ️  None.${C_RESET}"
+        SELECTED_USER="NO_USERS"
+        return
+    fi
+    echo -e "\nSelect user:\n"
+    for i in "${!users[@]}"; do
+        printf "  ${C_GREEN}[%2d]${C_RESET} %s\n" "$((i+1))" "${users[$i]}"
+    done
+    echo -e "\n  ${C_RED}[ 0]${C_RESET} Cancel"
+    while true; do
+        read -p "👉 Number: " c
+        if [[ "$c" =~ ^[0-9]+$ ]] && [ "$c" -ge 0 ] && [ "$c" -le "${#users[@]}" ]; then
+            if [ "$c" -eq 0 ]; then
+                SELECTED_USER=""
+                return
+            else
+                SELECTED_USER="${users[$((c-1))]}"
+                return
+            fi
+        else
+            echo -e "${C_RED}❌ Invalid.${C_RESET}"
+        fi
+    done
+}
+
+_select_multi_v2ray_user_interface() {
+    local title="$1"
+    clear; show_banner
+    echo -e "${C_BOLD}${C_PURPLE}${title}${C_RESET}\n"
+    SELECTED_USERS=()
+    if [[ ! -s "$V2RAY_USERS_DB" ]]; then
+        echo -e "${C_YELLOW}ℹ️  No users.${C_RESET}"
+        SELECTED_USERS=("NO_USERS")
+        return
+    fi
+    mapfile -t all_users < <(cut -d: -f1 "$V2RAY_USERS_DB" | sort)
+    if [ ${#all_users[@]} -ge 15 ]; then
+        read -p "👉 Search: " st
+        if [[ -n "$st" ]]; then
+            mapfile -t users < <(printf "%s\n" "${all_users[@]}" | grep -i "$st")
+        else
+            users=("${all_users[@]}")
+        fi
+    else
+        users=("${all_users[@]}")
+    fi
+    if [ ${#users[@]} -eq 0 ]; then
+        echo -e "\n${C_YELLOW}ℹ️  None.${C_RESET}"
+        SELECTED_USERS=("NO_USERS")
+        return
+    fi
+    echo -e "\nSelect users:\n"
+    for i in "${!users[@]}"; do
+        printf "  ${C_GREEN}[%2d]${C_RESET} %s\n" "$((i+1))" "${users[$i]}"
+    done
+    echo -e "\n  ${C_GREEN}[all]${C_RESET} Select ALL   ${C_RED}[ 0]${C_RESET} Cancel"
+    while true; do
+        read -p "👉 Numbers: " c
+        c=$(echo "$c" | tr ',' ' ')
+        if [[ -z "$c" ]]; then echo -e "${C_RED}❌ Invalid.${C_RESET}"; continue; fi
+        if [[ "$c" == "0" ]]; then SELECTED_USERS=(); return; fi
+        if [[ "${c,,}" == "all" ]]; then SELECTED_USERS=("${users[@]}"); return; fi
+        local valid=true; local si=()
+        for t in $c; do
+            if [[ "$t" =~ ^[0-9]+-[0-9]+$ ]]; then
+                local s=${t%-*}; local e=${t#*-}
+                if [ "$s" -le "$e" ]; then
+                    for (( i=s; i<=e; i++ )); do
+                        if [ "$i" -ge 1 ] && [ "$i" -le "${#users[@]}" ]; then
+                            si+=($i)
+                        else
+                            valid=false; break
+                        fi
+                    done
+                else
+                    valid=false; break
+                fi
+            elif [[ "$t" =~ ^[0-9]+$ ]]; then
+                if [ "$t" -ge 1 ] && [ "$t" -le "${#users[@]}" ]; then
+                    si+=($t)
+                else
+                    valid=false; break
+                fi
+            else
+                valid=false; break
+            fi
+        done
+        if [[ "$valid" == true && ${#si[@]} -gt 0 ]]; then
+            mapfile -t ui < <(printf "%s\n" "${si[@]}" | sort -u -n)
+            for i in "${ui[@]}"; do
+                SELECTED_USERS+=("${users[$((i-1))]}")
+            done
+            return
+        else
+            echo -e "${C_RED}❌ Invalid.${C_RESET}"
+        fi
+    done
+}
+
+# ============================================================
+# SPEED BOOSTERS
 # ============================================================
 _apply_tfo_bbr() {
     modprobe tcp_bbr 2>/dev/null
@@ -298,13 +428,13 @@ download_v2ray_binary() {
         *) echo -e "${C_RED}❌ Arch unsupported: $arch${C_RESET}"; return 1 ;;
     esac
     local tmp="/tmp/xray.zip"
-    curl -sL "$url" -o "$tmp" || { echo -e "${C_RED}❌ Download fail${C_RESET}"; return 1; }
+    curl -fsL "$url" -o "$tmp" || { echo -e "${C_RED}❌ Download fail${C_RESET}"; return 1; }
     command -v unzip &>/dev/null || ff_apt_install unzip >/dev/null 2>&1
     rm -rf /tmp/xray-extract; mkdir -p /tmp/xray-extract
     unzip -o "$tmp" -d /tmp/xray-extract >/dev/null 2>&1
     install -m 755 /tmp/xray-extract/xray "$V2RAY_BIN" || { echo -e "${C_RED}❌ Install fail${C_RESET}"; return 1; }
     rm -rf /tmp/xray-extract "$tmp"
-    echo -e "${C_GREEN}✅ V2Ray binary tayari${C_RESET}"
+    echo -e "${C_GREEN}✅ V2Ray binary ready${C_RESET}"
 }
 
 generate_v2ray_uuid() {
@@ -317,27 +447,20 @@ generate_v2ray_uuid() {
 }
 
 generate_unique_uuid() {
-    local uuid
-    local i=0
+    local uuid i=0
     while (( i < 10 )); do
         uuid=$(generate_v2ray_uuid)
         if [ ! -f "$V2RAY_USERS_DB" ] || ! grep -q ":$uuid:" "$V2RAY_USERS_DB"; then
-            echo "$uuid"
-            return
+            echo "$uuid"; return
         fi
         ((i++))
     done
     echo "$uuid"
 }
 
-# ============ SOMA ACTIVE V2RAY CLIENTS (KWA CONFIG) ============
 get_active_v2ray_clients() {
-    local json=""
-    local first=1
-    if [ ! -f "$V2RAY_USERS_DB" ]; then
-        echo ""
-        return
-    fi
+    local json="" first=1
+    [ ! -f "$V2RAY_USERS_DB" ] && { echo ""; return; }
     while IFS=: read -r user uuid expiry limit bw traffic status; do
         [[ -z "$user" || "$user" == \#* ]] && continue
         [[ "$status" == "LOCKED" || "$status" == "EXPIRED" || "$status" == "EXHAUSTED" ]] && continue
@@ -362,8 +485,29 @@ write_v2ray_config() {
     source "$V2RAY_INFO_FILE" 2>/dev/null
 
     case "$proto" in
-        vless)
-            local clients=$(get_active_v2ray_clients)
+        vless|vmess|trojan)
+            local clients=""
+            local first=1
+            if [ -f "$V2RAY_USERS_DB" ]; then
+                while IFS=: read -r user uuid expiry limit bw traffic status; do
+                    [[ -z "$user" || "$user" == \#* ]] && continue
+                    [[ "$status" == "LOCKED" || "$status" == "EXPIRED" || "$status" == "EXHAUSTED" ]] && continue
+                    local et=$(date -d "$expiry" +%s 2>/dev/null || echo 0)
+                    [[ $et -gt 0 && $et -lt $(date +%s) ]] && continue
+                    if [[ "$bw" != "0" && -n "$bw" ]]; then
+                        local qb=$(awk "BEGIN{printf \"%.0f\", $bw*1073741824}")
+                        local ub=$(awk "BEGIN{printf \"%.0f\", $traffic*1073741824}" 2>/dev/null || echo 0)
+                        [[ "$ub" -ge "$qb" ]] && continue
+                    fi
+                    if [[ $first -eq 0 ]]; then clients+=","; fi
+                    case "$proto" in
+                        vless)  clients+="{\"id\":\"$uuid\",\"email\":\"${user}@dnstt\"}" ;;
+                        vmess)  clients+="{\"id\":\"$uuid\",\"alterId\":0,\"email\":\"${user}@dnstt\"}" ;;
+                        trojan) clients+="{\"password\":\"$uuid\",\"email\":\"${user}@dnstt\"}" ;;
+                    esac
+                    first=0
+                done < "$V2RAY_USERS_DB"
+            fi
             cat > "$V2RAY_CONFIG_FILE" <<EOF
 {
   "log": { "loglevel": "warning", "access": "none", "error": "$LOGS_DIR/v2ray-error.log" },
@@ -377,104 +521,8 @@ write_v2ray_config() {
     {
       "listen": "127.0.0.1",
       "port": $V2RAY_PORT,
-      "protocol": "vless",
-      "settings": { "clients": [$clients], "decryption": "none" },
-      "streamSettings": { "network": "tcp", "security": "none" },
-      "tag": "dnstt-inbound"
-    },
-    {
-      "listen": "127.0.0.1",
-      "port": $V2RAY_STATS_PORT,
-      "protocol": "dokodemo-door",
-      "settings": { "address": "127.0.0.1" },
-      "tag": "api"
-    }
-  ],
-  "outbounds": [{ "protocol": "freedom", "tag": "direct" }],
-  "routing": {
-    "rules": [{ "type": "field", "inboundTag": ["api"], "outboundTag": "api" }]
-  }
-}
-EOF
-            ;;
-        vmess)
-            local vmess_clients=""
-            local first=1
-            if [ -f "$V2RAY_USERS_DB" ]; then
-                while IFS=: read -r user uuid expiry limit bw traffic status; do
-                    [[ -z "$user" || "$user" == \#* ]] && continue
-                    [[ "$status" == "LOCKED" || "$status" == "EXPIRED" || "$status" == "EXHAUSTED" ]] && continue
-                    local et=$(date -d "$expiry" +%s 2>/dev/null || echo 0)
-                    [[ $et -gt 0 && $et -lt $(date +%s) ]] && continue
-                    if [[ "$bw" != "0" && -n "$bw" ]]; then
-                        local qb=$(awk "BEGIN{printf \"%.0f\", $bw*1073741824}")
-                        local ub=$(awk "BEGIN{printf \"%.0f\", $traffic*1073741824}" 2>/dev/null || echo 0)
-                        [[ "$ub" -ge "$qb" ]] && continue
-                    fi
-                    if [[ $first -eq 0 ]]; then vmess_clients+=","; fi
-                    vmess_clients+="{\"id\":\"$uuid\",\"alterId\":0,\"email\":\"${user}@dnstt\"}"
-                    first=0
-                done < "$V2RAY_USERS_DB"
-            fi
-            cat > "$V2RAY_CONFIG_FILE" <<EOF
-{
-  "log": { "loglevel": "warning", "access": "none", "error": "$LOGS_DIR/v2ray-error.log" },
-  "api": { "tag": "api", "services": ["StatsService"] },
-  "stats": {},
-  "policy": { "levels": { "0": { "statsUserUplink": true, "statsUserDownlink": true } } },
-  "inbounds": [
-    {
-      "listen": "127.0.0.1",
-      "port": $V2RAY_PORT,
-      "protocol": "vmess",
-      "settings": { "clients": [$vmess_clients] },
-      "streamSettings": { "network": "tcp", "security": "none" },
-      "tag": "dnstt-inbound"
-    },
-    {
-      "listen": "127.0.0.1",
-      "port": $V2RAY_STATS_PORT,
-      "protocol": "dokodemo-door",
-      "settings": { "address": "127.0.0.1" },
-      "tag": "api"
-    }
-  ],
-  "outbounds": [{ "protocol": "freedom", "tag": "direct" }],
-  "routing": { "rules": [{ "type": "field", "inboundTag": ["api"], "outboundTag": "api" }] }
-}
-EOF
-            ;;
-        trojan)
-            local trojan_clients=""
-            local first=1
-            if [ -f "$V2RAY_USERS_DB" ]; then
-                while IFS=: read -r user uuid expiry limit bw traffic status; do
-                    [[ -z "$user" || "$user" == \#* ]] && continue
-                    [[ "$status" == "LOCKED" || "$status" == "EXPIRED" || "$status" == "EXHAUSTED" ]] && continue
-                    local et=$(date -d "$expiry" +%s 2>/dev/null || echo 0)
-                    [[ $et -gt 0 && $et -lt $(date +%s) ]] && continue
-                    if [[ "$bw" != "0" && -n "$bw" ]]; then
-                        local qb=$(awk "BEGIN{printf \"%.0f\", $bw*1073741824}")
-                        local ub=$(awk "BEGIN{printf \"%.0f\", $traffic*1073741824}" 2>/dev/null || echo 0)
-                        [[ "$ub" -ge "$qb" ]] && continue
-                    fi
-                    if [[ $first -eq 0 ]]; then trojan_clients+=","; fi
-                    trojan_clients+="{\"password\":\"$uuid\",\"email\":\"${user}@dnstt\"}"
-                    first=0
-                done < "$V2RAY_USERS_DB"
-            fi
-            cat > "$V2RAY_CONFIG_FILE" <<EOF
-{
-  "log": { "loglevel": "warning", "access": "none", "error": "$LOGS_DIR/v2ray-error.log" },
-  "api": { "tag": "api", "services": ["StatsService"] },
-  "stats": {},
-  "policy": { "levels": { "0": { "statsUserUplink": true, "statsUserDownlink": true } } },
-  "inbounds": [
-    {
-      "listen": "127.0.0.1",
-      "port": $V2RAY_PORT,
-      "protocol": "trojan",
-      "settings": { "clients": [$trojan_clients] },
+      "protocol": "$proto",
+      "settings": { "clients": [$clients]$( [[ "$proto" == "vless" ]] && echo ', "decryption": "none"' ) },
       "streamSettings": { "network": "tcp", "security": "none" },
       "tag": "dnstt-inbound"
     },
@@ -500,7 +548,7 @@ sync_v2ray_config() {
     echo -e "${C_BLUE}🔄 Syncing V2Ray config...${C_RESET}"
     if [ -x "$V2RAY_BIN" ]; then
         write_v2ray_config
-        if "$V2RAY_BIN" run -test -c "$V2RAY_CONFIG_FILE" 2>/dev/null; then
+        if "$V2RAY_BIN" -test -c "$V2RAY_CONFIG_FILE" 2>/dev/null; then
             echo -e "${C_GREEN}✅ Config valid${C_RESET}"
         else
             echo -e "${C_YELLOW}⚠️  Config test failed${C_RESET}"
@@ -548,7 +596,7 @@ setup_v2ray_backend() {
     echo -e "\n${C_BLUE}🔷 V2Ray (Xray) backend setup...${C_RESET}"
 
     if [ -f "$V2RAY_SERVICE_FILE" ]; then
-        echo -e "  ${C_GREEN}✅ V2Ray tayari imesakinishwa${C_RESET}"
+        echo -e "  ${C_GREEN}✅ V2Ray already installed${C_RESET}"
         source "$V2RAY_INFO_FILE" 2>/dev/null
         systemctl is-active --quiet v2ray-dnstt.service || systemctl start v2ray-dnstt.service
         return 0
@@ -600,6 +648,452 @@ uninstall_v2ray_backend() {
 }
 
 # ============================================================
+# V2RAY BANNER BUILDER — Voltron signature
+# Args: user expiry bandwidth_gb sessions limit status_label status_color
+# ============================================================
+create_v2ray_banner_builder() {
+    cat > "$BANNER_BUILDER" << 'BBEOF'
+#!/bin/bash
+user="$1"
+expiry="$2"
+bandwidth_gb="$3"
+sessions="$4"
+limit="$5"
+status_label="$6"
+status_color="$7"
+
+BANDWIDTH_DIR="/etc/dnstt-v2ray/bandwidth"
+
+format_size() {
+    local bytes=$1
+    [[ "$bytes" =~ ^[0-9]+$ ]] || bytes=0
+    if (( bytes >= 1073741824 )); then
+        awk "BEGIN{printf \"%.2f GB\", $bytes/1073741824}"
+    elif (( bytes >= 1048576 )); then
+        awk "BEGIN{printf \"%.2f MB\", $bytes/1048576}"
+    elif (( bytes >= 1024 )); then
+        awk "BEGIN{printf \"%.2f KB\", $bytes/1024}"
+    else
+        echo "${bytes} B"
+    fi
+}
+
+bw_info=""
+if [[ "$bandwidth_gb" == "0" || -z "$bandwidth_gb" ]]; then
+    bw_info='<font color="#6BCB77">Unlimited ∞</font>'
+else
+    ub=0
+    usage_file="$BANDWIDTH_DIR/v2ray_${user}.usage"
+    if [[ -f "$usage_file" ]]; then
+        ub=$(cat "$usage_file" 2>/dev/null | tr -d '[:space:]')
+        [[ ! "$ub" =~ ^[0-9]+$ ]] && ub=0
+    fi
+
+    limit_bytes=$(awk "BEGIN{printf \"%.0f\", $bandwidth_gb*1073741824}")
+    [[ "$limit_bytes" -le 0 ]] && limit_bytes=1
+
+    pct=$(awk "BEGIN{printf \"%.1f\", ($ub/$limit_bytes)*100}")
+    pct_int=$(awk "BEGIN{printf \"%d\", ($ub/$limit_bytes)*100}")
+    [[ "$pct_int" -gt 100 ]] && pct_int=100
+    [[ "$pct_int" -lt 0 ]] && pct_int=0
+
+    remaining_bytes=$((limit_bytes - ub))
+    [[ $remaining_bytes -lt 0 ]] && remaining_bytes=0
+
+    used_display=$(format_size "$ub")
+    limit_display=$(format_size "$limit_bytes")
+    remaining_display=$(format_size "$remaining_bytes")
+
+    bar_color="#6BCB77"; text_color="#6BCB77"
+    if (( $(echo "$pct >= 95" | bc -l) )); then
+        bar_color="#FF6B6B"; text_color="#FF6B6B"
+    elif (( $(echo "$pct >= 80" | bc -l) )); then
+        bar_color="#FF9F43"; text_color="#FF9F43"
+    elif (( $(echo "$pct >= 60" | bc -l) )); then
+        bar_color="#FFD93D"; text_color="#FFD93D"
+    fi
+
+    total_blocks=10
+    filled=$((pct_int * total_blocks / 100))
+    [[ $filled -gt $total_blocks ]] && filled=$total_blocks
+    [[ $filled -lt 0 ]] && filled=0
+    empty=$((total_blocks - filled))
+
+    bar=""
+    for ((i=0; i<filled; i++)); do bar+="█"; done
+    for ((i=0; i<empty; i++)); do bar+="░"; done
+
+    bw_info="<font color=\"$bar_color\">$bar</font> <font color=\"$text_color\"><b>${pct}%</b></font> <font color=\"#9B59B6\">|</font> <font color=\"#000000\">${used_display}/${limit_display}</font> <font color=\"#6BCB77\">(${remaining_display} left)</font>"
+fi
+
+uptime_str=$(uptime -p | sed 's/up //')
+load_str=$(awk '{print $1}' /proc/loadavg)
+
+bc=""
+bc+="<br><br>"
+bc+="<center><font color=\"#9B59B6\">‎▬▬▬▬▬ஜ۩</font><font color=\"#FF6B6B\" size=\"8\"><b> 🔷 VOLTRON V2RAY 🔷</b></font><font color=\"#9B59B6\">‎۩ஜ▬▬▬▬▬</font></center><br>"
+bc+="<br>"
+bc+="<center><font color=\"#4D96FF\" size=\"5\"><b>📋 ACCOUNT DETAILS 📋</b></font></center><br>"
+bc+="<br>"
+bc+="<center><font color=\"#000000\">👤 <b>Username      :</b> $user</font></center><br>"
+bc+="<center><font color=\"#000000\">📅 <b>Expiration    :</b> $expiry</font></center><br>"
+bc+="<center>📊 <b>Bandwidth     :</b> $bw_info</center><br>"
+bc+="<center><font color=\"#000000\">🔌 <b>Sessions      :</b> $sessions/$limit</font></center><br>"
+bc+="<center><font color=\"$status_color\" size=\"4\"><b>📌 Account Status : $status_label</b></font></center><br>"
+bc+="<br>"
+bc+="<center><font color=\"#000000\">⏱️ <b>Server Uptime :</b> $uptime_str</font></center><br>"
+bc+="<center><font color=\"#000000\">📈 <b>Server Load   :</b> $load_str</font></center><br>"
+bc+="<br>"
+bc+="<center><font color=\"#6BCB77\" size=\"4\"><b>📢 JOIN OUR COMMUNITY 📢</b></font></center><br>"
+bc+="<center><font color=\"#000000\">📱 Telegram  : https://t.me/voltrontech</font></center><br>"
+bc+="<br>"
+bc+="<center><font color=\"#FF6B6B\" size=\"4\"><b>⚠️ IMPORTANT NOTICE ⚠️</b></font></center><br>"
+bc+="<center><font color=\"#000000\">• Account expires on: $expiry</font></center><br>"
+bc+="<center><font color=\"#000000\">• No torrent or illegal activity</font></center><br>"
+bc+="<br>"
+bc+="<center><font color=\"#9B59B6\">‎▬▬▬▬▬ஜ۩</font><font color=\"#FF6B6B\" size=\"8\"><b>  🔷 VOLTRON V2RAY 🔷 </b></font><font color=\"#9B59B6\">‎۩ஜ▬▬▬▬▬</font></center><br>"
+
+printf "%s" "$bc"
+BBEOF
+    chmod +x "$BANNER_BUILDER"
+}
+
+# ============================================================
+# V2RAY LIMITER — Voltron v10.18 Logic (FIXED)
+# ============================================================
+create_v2ray_limiter() {
+    cat > "$V2RAY_LIMITER_SCRIPT" <<'LIMEOF'
+#!/bin/bash
+# ============================================================
+# V2RAY LIMITER — Voltron v10.18 Logic
+# Bandwidth: Xray Stats API (email-based)
+# Everything else: identical to Voltron SSH limiter
+# ============================================================
+DB_FILE="/etc/dnstt-v2ray/v2ray_users.db"
+BW_DIR="/etc/dnstt-v2ray/bandwidth"
+BANNER_DIR="/etc/dnstt-v2ray/banners"
+BANNER_ENABLED_FILE="/etc/dnstt-v2ray/banners_enabled"
+BANNER_BUILDER="/usr/local/bin/v2ray-banner-build.sh"
+XRAY_BIN="/usr/local/bin/xray"
+XRAY_API="127.0.0.1:10085"
+V2RAY_SERVICE="v2ray-dnstt.service"
+V2RAY_CONFIG="/etc/dnstt-v2ray/v2ray/config.json"
+V2RAY_INFO="/etc/dnstt-v2ray/v2ray_info.conf"
+CONFIG_DIRTY="/tmp/v2ray-config-dirty"
+LOG_FILE="/var/log/v2ray-limiter.log"
+LOCK_FILE="/var/run/v2ray-limiter.lock"
+V2RAY_PORT="10086"
+V2RAY_STATS_PORT="10085"
+SCAN=15
+API_TIMEOUT=5
+
+# ============ SETUP ============
+mkdir -p "$BW_DIR" "$BANNER_DIR"
+touch "$LOG_FILE"
+
+exec 200>"$LOCK_FILE"
+flock -n 200 || { echo "[$(date '+%F %T')] Another instance running" >> "$LOG_FILE"; exit 1; }
+
+log() { echo "[$(date '+%F %T')] $*" >> "$LOG_FILE"; }
+trap 'log "Stopped (SIGTERM/SIGINT)"; exit 0' SIGTERM SIGINT
+log "Limiter started (PID=$$)"
+
+[[ ! -x "$XRAY_BIN" ]] && { log "ERROR: Xray binary missing"; exit 1; }
+
+# ============ GET XRAY STAT ============
+get_stat() {
+    local email="$1" dir="$2"
+    timeout "$API_TIMEOUT" "$XRAY_BIN" api statsquery \
+        --server="$XRAY_API" \
+        -pattern "user>>>${email}>>>traffic>>>${dir}" 2>/dev/null \
+        | grep -oP '"value":\s*\K[0-9]+' | head -1
+}
+
+# ============ GET SESSIONS PER USER ============
+# Xray haitoi per-user sessions. Tunatumia `ss` kuhesabu connections
+# ambazo zina Xray PID na zinahusiana na port ya V2Ray.
+get_sessions() {
+    local user="$1"
+    # Try to count connections from stats (inbound)
+    # Fallback: count established connections to V2Ray port
+    local port="${V2RAY_PORT:-10086}"
+    local c=$(ss -tn state established "( sport = :$port )" 2>/dev/null | tail -n +2 | wc -l)
+    [[ "$c" =~ ^[0-9]+$ ]] || c=0
+    echo "$c"
+}
+
+# ============ RELOAD XRAY ============
+reload_xray() {
+    log "Config dirty → reloading $V2RAY_SERVICE"
+    touch "$CONFIG_DIRTY"
+    systemctl restart "$V2RAY_SERVICE" 2>/dev/null
+    sleep 1
+    if systemctl is-active --quiet "$V2RAY_SERVICE"; then
+        log "Xray reloaded OK"
+    else
+        log "ERROR: Xray failed to reload"
+    fi
+}
+
+# ============ REBUILD XRAY CONFIG (Voltron-style rebuild) ============
+rebuild_xray_config() {
+    source "$V2RAY_INFO" 2>/dev/null
+    local proto="${V2RAY_PROTOCOL:-vless}"
+    local port="${V2RAY_PORT:-10086}"
+    local stats_port="${V2RAY_STATS_PORT:-10085}"
+
+    local clients=""; local first=1
+    while IFS=: read -r u uuid expiry limit bw traffic status; do
+        [[ -z "$u" || "$u" == \#* ]] && continue
+        [[ "$status" == "LOCKED" || "$status" == "EXPIRED" || "$status" == "EXHAUSTED" ]] && continue
+        local et=$(date -d "$expiry" +%s 2>/dev/null || echo 0)
+        [[ $et -gt 0 && $et -lt $(date +%s) ]] && continue
+        if [[ "$bw" != "0" && -n "$bw" ]]; then
+            local ub=0
+            [[ -f "$BW_DIR/v2ray_${u}.usage" ]] && ub=$(cat "$BW_DIR/v2ray_${u}.usage" 2>/dev/null | tr -d '[:space:]')
+            [[ ! "$ub" =~ ^[0-9]+$ ]] && ub=0
+            local qb=$(awk "BEGIN{printf \"%.0f\", $bw*1073741824}")
+            (( ub >= qb )) && continue
+        fi
+        [[ $first -eq 0 ]] && clients+=","
+        case "$proto" in
+            vless)  clients+="{\"id\":\"$uuid\",\"email\":\"${u}@dnstt\"}" ;;
+            vmess)  clients+="{\"id\":\"$uuid\",\"alterId\":0,\"email\":\"${u}@dnstt\"}" ;;
+            trojan) clients+="{\"password\":\"$uuid\",\"email\":\"${u}@dnstt\"}" ;;
+        esac
+        first=0
+    done < "$DB_FILE"
+
+    cat > "$V2RAY_CONFIG" <<EOF
+{
+  "log": { "loglevel": "warning", "access": "none", "error": "/etc/dnstt-v2ray/logs/v2ray-error.log" },
+  "api": { "tag": "api", "services": ["StatsService"] },
+  "stats": {},
+  "policy": {
+    "levels": { "0": { "statsUserUplink": true, "statsUserDownlink": true } },
+    "system": { "statsInboundUplink": true, "statsInboundDownlink": true }
+  },
+  "inbounds": [
+    {
+      "listen": "127.0.0.1",
+      "port": $port,
+      "protocol": "$proto",
+      "settings": { "clients": [$clients]$( [[ "$proto" == "vless" ]] && echo ', "decryption": "none"' ) },
+      "streamSettings": { "network": "tcp", "security": "none" },
+      "tag": "dnstt-inbound"
+    },
+    {
+      "listen": "127.0.0.1",
+      "port": $stats_port,
+      "protocol": "dokodemo-door",
+      "settings": { "address": "127.0.0.1" },
+      "tag": "api"
+    }
+  ],
+  "outbounds": [{ "protocol": "freedom", "tag": "direct" }],
+  "routing": { "rules": [{ "type": "field", "inboundTag": ["api"], "outboundTag": "api" }] }
+}
+EOF
+    chmod 600 "$V2RAY_CONFIG"
+    log "Config rebuilt"
+}
+
+# ============ MAIN LOOP ============
+while true; do
+    [[ ! -s "$DB_FILE" ]] && { sleep $SCAN; continue; }
+    ts=$(date +%s)
+    dyn=false
+    [[ -f "$BANNER_ENABLED_FILE" ]] && dyn=true
+    dirty=0
+
+    while IFS=: read -r user uuid expiry limit bw traffic status; do
+        [[ -z "$user" || "$user" == \#* ]] && continue
+        [[ -z "$status" ]] && status="ACTIVE"
+        [[ "$limit" =~ ^[0-9]+$ ]] || limit=999
+        [[ "$bw" =~ ^[0-9]+\.?[0-9]*$ ]] || bw=0
+
+        email="${user}@dnstt"
+
+        # ==================================================
+        # BANDWIDTH: Xray Stats API
+        # ==================================================
+        uplink=$(get_stat "$email" "uplink")
+        downlink=$(get_stat "$email" "downlink")
+        [[ -z "$uplink" ]] && uplink=0
+        [[ -z "$downlink" ]] && downlink=0
+        total=$((uplink + downlink))
+
+        # ==================================================
+        # SESSIONS
+        # ==================================================
+        oc=$(get_sessions "$user")
+        [[ "$oc" =~ ^[0-9]+$ ]] || oc=0
+
+        # ==================================================
+        # STATUS CHECKS (Voltron priority)
+        # ==================================================
+        locked=false; expired=false; ex=false
+
+        [[ "$status" == "LOCKED" ]] && locked=true
+
+        et=0; days_left=999
+        if [[ "$expiry" != "Never" && -n "$expiry" ]]; then
+            et=$(date -d "$expiry" +%s 2>/dev/null || echo 0)
+            if [[ "$et" =~ ^[0-9]+$ ]] && (( et > 0 )); then
+                days_left=$(( (et - ts) / 86400 ))
+                if (( days_left < 0 )); then
+                    expired=true
+                    if ! $locked; then
+                        awk -F: -v u="$user" \
+                            'BEGIN{OFS=":"} $1==u{$7="EXPIRED"}1' "$DB_FILE" > "$DB_FILE.tmp" && \
+                            mv "$DB_FILE.tmp" "$DB_FILE"
+                        dirty=1
+                        locked=true
+                        log "EXPIRED: $user"
+                    fi
+                fi
+            fi
+        fi
+
+        if (( limit > 0 && oc > limit )) && ! $locked; then
+            awk -F: -v u="$user" \
+                'BEGIN{OFS=":"} $1==u{$7="LOCKED"}1' "$DB_FILE" > "$DB_FILE.tmp" && \
+                mv "$DB_FILE.tmp" "$DB_FILE"
+            dirty=1
+            locked=true
+            log "SESSION LIMIT: $user ($oc > $limit)"
+        fi
+
+        uf="$BW_DIR/v2ray_${user}.usage"
+        ad=0
+        [[ -f "$uf" ]] && { read -r ad < "$uf"; [[ "$ad" =~ ^[0-9]+$ ]] || ad=0; }
+        printf "%s\n" "$total" > "$uf"
+
+        if [[ "$bw" != "0" && -n "$bw" ]]; then
+            qb=$(awk "BEGIN{printf \"%.0f\", $bw*1073741824}")
+            if (( qb > 0 && total >= qb )); then
+                ex=true
+                if ! $locked; then
+                    awk -F: -v u="$user" \
+                        'BEGIN{OFS=":"} $1==u{$7="EXHAUSTED"}1' "$DB_FILE" > "$DB_FILE.tmp" && \
+                        mv "$DB_FILE.tmp" "$DB_FILE"
+                    dirty=1
+                    locked=true
+                    log "EXHAUSTED: $user"
+                fi
+            fi
+        fi
+
+        # ==================================================
+        # UPDATE DB field 6 (traffic GB)
+        # ==================================================
+        tg=$(awk "BEGIN{printf \"%.4f\", $total/1073741824}")
+        awk -F: -v u="$user" -v tg="$tg" \
+            'BEGIN{OFS=":"} $1==u{$6=tg}1' "$DB_FILE" > "$DB_FILE.tmp" && \
+            mv "$DB_FILE.tmp" "$DB_FILE"
+
+        # ==================================================
+        # DYNAMIC BANNER
+        # ==================================================
+        if $dyn; then
+            if $locked; then
+                if [[ "$status" == "LOCKED" ]]; then
+                    acct_status="🔒 LOCKED"; status_color="#FF6B6B"
+                elif $expired; then
+                    acct_status="🗓️ EXPIRED"; status_color="#FF9F43"
+                elif $ex; then
+                    acct_status="⚠️ DATA EXHAUSTED"; status_color="#FF6B6B"
+                else
+                    acct_status="🔒 LOCKED"; status_color="#FF6B6B"
+                fi
+            else
+                skip_bw=false
+                if (( days_left < 0 )); then
+                    acct_status="🗓️ EXPIRED"; status_color="#FF9F43"; skip_bw=true
+                elif (( days_left == 0 )); then
+                    acct_status="⚠️ EXPIRES TODAY"; status_color="#FF6B6B"; skip_bw=true
+                elif (( days_left <= 2 )); then
+                    acct_status="🔴 EXPIRING - ${days_left} DAY$( [[ $days_left -eq 1 ]] && echo '' || echo 'S' ) LEFT"; status_color="#FF9F43"; skip_bw=true
+                elif (( days_left <= 7 )); then
+                    acct_status="⏰ EXPIRING SOON - ${days_left} DAYS LEFT"; status_color="#FFD93D"; skip_bw=true
+                fi
+
+                if ! $skip_bw; then
+                    if $ex; then
+                        acct_status="⚠️ DATA EXHAUSTED"; status_color="#FF6B6B"
+                    else
+                        if [[ "$bw" != "0" && -n "$bw" && "$total" -gt 0 ]]; then
+                            qb=$(awk "BEGIN{printf \"%.0f\", $bw*1073741824}")
+                            pct=$(awk "BEGIN{printf \"%.1f\", ($total/$qb)*100}")
+                            if (( $(echo "$pct >= 95" | bc -l) )); then
+                                rem_disp=$(awk "BEGIN{printf \"%.2f\", $bw - ($total/1073741824)}")
+                                acct_status="🔴 CRITICAL - ${rem_disp} GB LEFT"; status_color="#FF9F43"
+                            else
+                                acct_status="✅ ACTIVE"; status_color="#6BCB77"
+                            fi
+                        else
+                            acct_status="✅ ACTIVE"; status_color="#6BCB77"
+                        fi
+                    fi
+                fi
+            fi
+
+            bf="$BANNER_DIR/v2ray_${user}.txt"
+            tf="${bf}.tmp"
+            if [[ -x "$BANNER_BUILDER" ]]; then
+                "$BANNER_BUILDER" "$user" "$expiry" "$bw" "$oc" "$limit" \
+                    "$acct_status" "$status_color" > "$tf" 2>/dev/null
+                if ! cmp -s "$tf" "$bf" 2>/dev/null; then
+                    mv "$tf" "$bf"
+                else
+                    rm -f "$tf"
+                fi
+                chmod 644 "$bf" 2>/dev/null
+            fi
+        fi
+    done < "$DB_FILE"
+
+    if [[ $dirty -eq 1 ]]; then
+        rebuild_xray_config
+        reload_xray
+    fi
+
+    sleep $SCAN
+done
+LIMEOF
+
+    chmod +x "$V2RAY_LIMITER_SCRIPT"
+
+    cat > "$V2RAY_LIMITER_SERVICE" <<EOF
+[Unit]
+Description=V2Ray Limiter (Voltron v10.18 Logic)
+After=network.target v2ray-dnstt.service
+Requires=v2ray-dnstt.service
+
+[Service]
+Type=simple
+ExecStart=$V2RAY_LIMITER_SCRIPT
+Restart=always
+RestartSec=10
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable v2ray-limiter.service >/dev/null 2>&1
+    systemctl restart v2ray-limiter.service >/dev/null 2>&1
+    sleep 2
+
+    if systemctl is-active --quiet v2ray-limiter.service; then
+        echo -e "${C_GREEN}✅ V2Ray Limiter started (Voltron logic)${C_RESET}"
+    else
+        echo -e "${C_RED}❌ Limiter failed. journalctl -u v2ray-limiter${C_RESET}"
+    fi
+}
+
+# ============================================================
 # V2RAY BACKEND MENU
 # ============================================================
 v2ray_backend_menu() {
@@ -608,30 +1102,36 @@ v2ray_backend_menu() {
         source "$V2RAY_INFO_FILE" 2>/dev/null
         local st=""
         systemctl is-active --quiet v2ray-dnstt.service 2>/dev/null && st="${C_GREEN}● RUNNING${C_RESET}" || st="${C_RED}● STOPPED${C_RESET}"
+        local lst=""
+        systemctl is-active --quiet v2ray-limiter.service 2>/dev/null && lst="${C_GREEN}● RUNNING${C_RESET}" || lst="${C_RED}● STOPPED${C_RESET}"
         local total=$(grep -c . "$V2RAY_USERS_DB" 2>/dev/null || echo 0)
-        local active=$(get_active_v2ray_clients | grep -o '"id"' | wc -l 2>/dev/null || echo 0)
 
         echo -e "${C_PURPLE}═══════════════════════════════════════════════════════════════════${C_RESET}"
         echo -e "${C_PURPLE}              🔷 V2RAY BACKEND SETTINGS${C_RESET}"
         echo -e "${C_PURPLE}═══════════════════════════════════════════════════════════════════${C_RESET}\n"
-        echo -e "  ${C_CYAN}Status${C_RESET}      : $st"
-        echo -e "  ${C_CYAN}Protocol${C_RESET}    : ${C_YELLOW}${V2RAY_PROTOCOL}${C_RESET}"
-        echo -e "  ${C_CYAN}Listen${C_RESET}      : 127.0.0.1:${V2RAY_PORT}"
-        echo -e "  ${C_CYAN}Stats API${C_RESET}   : 127.0.0.1:${V2RAY_STATS_PORT}"
-        echo -e "  ${C_CYAN}Total Users${C_RESET} : ${C_WHITE}$total${C_RESET} (${C_GREEN}$active active${C_RESET})\n"
+        echo -e "  ${C_CYAN}V2Ray${C_RESET}      : $st"
+        echo -e "  ${C_CYAN}Limiter${C_RESET}    : $lst"
+        echo -e "  ${C_CYAN}Protocol${C_RESET}   : ${C_YELLOW}${V2RAY_PROTOCOL}${C_RESET}"
+        echo -e "  ${C_CYAN}Listen${C_RESET}     : 127.0.0.1:${V2RAY_PORT}"
+        echo -e "  ${C_CYAN}Stats${C_RESET}      : 127.0.0.1:${V2RAY_STATS_PORT}"
+        echo -e "  ${C_CYAN}Total Users${C_RESET}: ${C_WHITE}$total${C_RESET}\n"
         echo -e "  ${C_GREEN}1)${C_RESET} Restart V2Ray"
-        echo -e "  ${C_GREEN}2)${C_RESET} View config"
-        echo -e "  ${C_GREEN}3)${C_RESET} View logs"
-        echo -e "  ${C_GREEN}4)${C_RESET} Change Protocol"
-        echo -e "  ${C_GREEN}5)${C_RESET} Change Port"
-        echo -e "  ${C_GREEN}6)${C_RESET} Sync Config (from DB)"
+        echo -e "  ${C_GREEN}2)${C_RESET} Restart Limiter"
+        echo -e "  ${C_GREEN}3)${C_RESET} View config"
+        echo -e "  ${C_GREEN}4)${C_RESET} View logs (V2Ray)"
+        echo -e "  ${C_GREEN}5)${C_RESET} View logs (Limiter)"
+        echo -e "  ${C_GREEN}6)${C_RESET} Change Protocol"
+        echo -e "  ${C_GREEN}7)${C_RESET} Change Port"
+        echo -e "  ${C_GREEN}8)${C_RESET} Sync Config"
         echo -e "  ${C_RED}0)${C_RESET} Return"
         read -p "👉 Choice: " c
         case $c in
             1) systemctl restart v2ray-dnstt.service; sleep 2; systemctl is-active --quiet v2ray-dnstt.service && echo "✅" || echo "❌"; press_enter ;;
-            2) clear; cat "$V2RAY_CONFIG_FILE" 2>/dev/null; press_enter ;;
-            3) clear; journalctl -u v2ray-dnstt.service -n 40 --no-pager; press_enter ;;
-            4)
+            2) systemctl restart v2ray-limiter.service; sleep 2; systemctl is-active --quiet v2ray-limiter.service && echo "✅" || echo "❌"; press_enter ;;
+            3) clear; cat "$V2RAY_CONFIG_FILE" 2>/dev/null; press_enter ;;
+            4) clear; journalctl -u v2ray-dnstt.service -n 40 --no-pager; press_enter ;;
+            5) clear; journalctl -u v2ray-limiter.service -n 40 --no-pager; echo -e "\n${C_CYAN}--- Log File ---${C_RESET}"; tail -30 /var/log/v2ray-limiter.log 2>/dev/null; press_enter ;;
+            6)
                 echo -e "  1) VLESS  2) VMess  3) Trojan"
                 read -p "  👉 [1]: " pc; pc=${pc:-1}
                 case $pc in
@@ -643,7 +1143,7 @@ v2ray_backend_menu() {
                 sync_v2ray_config
                 echo -e "${C_GREEN}✅ Protocol: $V2RAY_PROTOCOL${C_RESET}"
                 press_enter ;;
-            5)
+            7)
                 read -p "New port [${V2RAY_PORT}]: " np
                 [[ ! "$np" =~ ^[0-9]+$ ]] && { echo "❌"; press_enter; continue; }
                 V2RAY_PORT="$np"
@@ -656,7 +1156,7 @@ v2ray_backend_menu() {
                 fi
                 echo -e "${C_GREEN}✅ Port: $V2RAY_PORT${C_RESET}"
                 press_enter ;;
-            6) sync_v2ray_config; press_enter ;;
+            8) sync_v2ray_config; press_enter ;;
             0) return ;;
         esac
     done
@@ -674,38 +1174,27 @@ get_v2ray_user() {
     grep "^${1}:" "$V2RAY_USERS_DB" 2>/dev/null
 }
 
-# ============ STATUS (FIXED — jina tofauti) ============
 get_v2ray_status() {
     local user="$1"
-    local line=$(get_v2ray_user "$user")
+    local line=$(awk -F: -v u="$user" '$1==u{print;exit}' "$V2RAY_USERS_DB" 2>/dev/null)
     [[ -z "$line" ]] && { echo "NOT_FOUND"; return; }
 
-    local uuid=$(echo "$line" | cut -d: -f2)
-    local expiry=$(echo "$line" | cut -d: -f3)
-    local limit=$(echo "$line" | cut -d: -f4)
-    local bw=$(echo "$line" | cut -d: -f5)
-    local traffic=$(echo "$line" | cut -d: -f6)
-    local account_status=$(echo "$line" | cut -d: -f7)
+    local uuid expiry limit bw traffic account_status
+    IFS=: read -r _ uuid expiry limit bw traffic account_status <<< "$line"
 
-    if [[ "$account_status" == "LOCKED" ]]; then
-        echo "LOCKED"
-        return
-    fi
+    [[ "$account_status" == "LOCKED" ]] && { echo "LOCKED"; return; }
 
     local et=$(date -d "$expiry" +%s 2>/dev/null || echo 0)
     local now=$(date +%s)
-    if [[ $et -gt 0 && $et -lt $now ]]; then
-        echo "EXPIRED"
-        return
-    fi
+    [[ $et -gt 0 && $et -lt $now ]] && { echo "EXPIRED"; return; }
 
     if [[ "$bw" != "0" && -n "$bw" ]]; then
+        local ub=0
+        [[ -f "$BANDWIDTH_DIR/v2ray_${user}.usage" ]] && \
+            ub=$(cat "$BANDWIDTH_DIR/v2ray_${user}.usage" 2>/dev/null | tr -d '[:space:]')
+        [[ ! "$ub" =~ ^[0-9]+$ ]] && ub=0
         local qb=$(awk "BEGIN{printf \"%.0f\", $bw*1073741824}")
-        local ub=$(awk "BEGIN{printf \"%.0f\", $traffic*1073741824}" 2>/dev/null || echo 0)
-        if [[ "$ub" -ge "$qb" ]]; then
-            echo "EXHAUSTED"
-            return
-        fi
+        (( ub >= qb )) && { echo "EXHAUSTED"; return; }
     fi
 
     echo "ACTIVE"
@@ -721,7 +1210,6 @@ get_v2ray_days_left() {
     echo $(( (et - now) / 86400 ))
 }
 
-# ============ CREATE ============
 create_v2ray_user() {
     clear; show_banner
     echo -e "${C_BOLD}${C_PURPLE}--- ✨ Create V2Ray User ---${C_RESET}\n"
@@ -729,13 +1217,13 @@ create_v2ray_user() {
     [[ "$username" == "0" || -z "$username" ]] && { press_enter; return; }
 
     if v2ray_user_exists "$username"; then
-        echo -e "\n${C_RED}❌ User '$username' tayari ipo.${C_RESET}"
+        echo -e "\n${C_RED}❌ User '$username' exists.${C_RESET}"
         press_enter; return
     fi
 
     echo -e "\n🔑 UUID:"
     echo -e "  ${C_GREEN}[1]${C_RESET} Auto-generate (unique)"
-    echo -e "  ${C_GREEN}[2]${C_RESET} Weka mwenyewe"
+    echo -e "  ${C_GREEN}[2]${C_RESET} Custom"
     read -p "👉 [1]: " uc; uc=${uc:-1}
 
     local uuid
@@ -756,7 +1244,6 @@ create_v2ray_user() {
     local expiry=$(date -d "+$days days" +%Y-%m-%d)
 
     echo "$username:$uuid:$expiry:$limit:$bw:0:ACTIVE" >> "$V2RAY_USERS_DB"
-    touch "$BANDWIDTH_DIR/v2ray_${username}.usage"
     echo "0" > "$BANDWIDTH_DIR/v2ray_${username}.usage"
 
     sync_v2ray_config
@@ -769,17 +1256,10 @@ create_v2ray_user() {
     echo -e "  📶 Limit    : ${C_YELLOW}$limit${C_RESET}"
     [[ "$bw" == "0" ]] && echo -e "  📦 BW       : ${C_GREEN}Unlimited${C_RESET}" || echo -e "  📦 BW       : ${C_YELLOW}$bw GB${C_RESET}"
 
-    echo -e "\n${C_CYAN}📱 Nekobox Link:${C_RESET}"
-    case "$V2RAY_PROTOCOL" in
-        vless)  echo -e "  ${C_DIM}vless://$uuid@127.0.0.1:$V2RAY_PORT?encryption=none&security=none&type=tcp#$username${C_RESET}" ;;
-        vmess)  echo -e "  ${C_DIM}vmess://$uuid@127.0.0.1:$V2RAY_PORT#$username${C_RESET}" ;;
-        trojan) echo -e "  ${C_DIM}trojan://$uuid@127.0.0.1:$V2RAY_PORT#$username${C_RESET}" ;;
-    esac
-    echo -e "\n${C_ORANGE}⚠️  Mteja LAZIMA kutumia SlipNet kwanza (DNSTT tunnel)${C_RESET}"
+    echo -e "\n${C_ORANGE}⚠️  Client MUST use SlipNet first (DNSTT tunnel)${C_RESET}"
     press_enter
 }
 
-# ============ DELETE ============
 delete_v2ray_user() {
     clear; show_banner
     echo -e "${C_BOLD}${C_PURPLE}--- 🗑️  Delete V2Ray User ---${C_RESET}\n"
@@ -825,7 +1305,6 @@ delete_v2ray_user() {
     press_enter
 }
 
-# ============ EDIT ============
 edit_v2ray_user() {
     clear; show_banner
     echo -e "${C_BOLD}${C_PURPLE}--- ✏️  Edit V2Ray User ---${C_RESET}\n"
@@ -908,7 +1387,6 @@ edit_v2ray_user() {
     done
 }
 
-# ============ LIST (FIXED — echo -e, sio printf) ============
 list_v2ray_users() {
     clear; show_banner
     echo -e "${C_BOLD}${C_PURPLE}═══ 📋 V2RAY USERS LIST ═══${C_RESET}\n"
@@ -923,47 +1401,49 @@ list_v2ray_users() {
         ((total++))
 
         local ub=0
-        [[ -f "$BANDWIDTH_DIR/v2ray_${user}.usage" ]] && ub=$(cat "$BANDWIDTH_DIR/v2ray_${user}.usage" 2>/dev/null | tr -d '[:space:]')
+        [[ -f "$BANDWIDTH_DIR/v2ray_${user}.usage" ]] && \
+            ub=$(tr -d '[:space:]' < "$BANDWIDTH_DIR/v2ray_${user}.usage" 2>/dev/null)
         [[ ! "$ub" =~ ^[0-9]+$ ]] && ub=0
 
         local bw_display=""
         if [[ "$bw" == "0" || -z "$bw" ]]; then
             bw_display="${C_GREEN}Unlimited ∞${C_RESET}"
         else
-            local qb=$(awk "BEGIN{printf \"%.0f\", $bw*1073741824}")
-            local pct=0
+            local qb pct pct_int bar color used_disp limit_disp
+            qb=$(awk "BEGIN{printf \"%.0f\", $bw*1073741824}")
+            pct=0
             (( qb > 0 )) && pct=$(awk "BEGIN{printf \"%.1f\", ($ub/$qb)*100}")
-            local pct_int=$(awk "BEGIN{printf \"%d\", $pct}")
+            pct_int=$(awk "BEGIN{printf \"%d\", $pct}")
             [[ $pct_int -gt 100 ]] && pct_int=100
             [[ $pct_int -lt 0 ]] && pct_int=0
-            local bar=$(build_bar "$pct_int" 10)
-            local color=$(get_bar_color "$pct_int")
-            local used_disp=$(format_size "$ub")
-            local limit_disp=$(format_size "$qb")
+            bar=$(build_bar "$pct_int" 10)
+            color=$(get_bar_color "$pct_int")
+            used_disp=$(format_size "$ub")
+            limit_disp=$(format_size "$qb")
             bw_display="${color}${bar}${C_RESET} ${pct}% | ${used_disp}/${limit_disp}"
         fi
 
         local st=$(get_v2ray_status "$user")
-        local st_display=""; local st_color=""
+        local st_display="" st_color=""
         case "$st" in
-            ACTIVE)    st_display="ACTIVE ✅"; st_color="$C_GREEN" ;;
-            LOCKED)    st_display="LOCKED 🔒"; st_color="$C_RED" ;;
-            EXPIRED)   st_display="EXPIRED 🗓️"; st_color="$C_ORANGE" ;;
-            EXHAUSTED) st_display="EXHAUSTED 📦"; st_color="$C_ORANGE" ;;
-            *)         st_display="UNKNOWN ❓"; st_color="$C_GRAY" ;;
+            ACTIVE)    st_display="✅ ACTIVE"; st_color="$C_GREEN" ;;
+            LOCKED)    st_display="🔒 LOCKED"; st_color="$C_RED" ;;
+            EXPIRED)   st_display="🗓️ EXPIRED"; st_color="$C_ORANGE" ;;
+            EXHAUSTED) st_display="📦 EXHAUSTED"; st_color="$C_ORANGE" ;;
+            *)         st_display="❓ UNKNOWN"; st_color="$C_GRAY" ;;
         esac
 
         local dl=$(get_v2ray_days_left "$user")
         local dl_display="${dl} days"
         [[ $dl -lt 0 ]] && dl_display="expired"
-        [[ $dl -eq 0 ]] && dl_display="TODAY (expires)"
+        [[ $dl -eq 0 ]] && dl_display="today"
 
         echo -e "${C_CYAN}┌─────────────────────────────────────────────────────────────┐${C_RESET}"
-        echo -e "${C_CYAN}│${C_RESET} USER:   ${C_WHITE}${user}${C_RESET}"
-        echo -e "${C_CYAN}│${C_RESET} UUID:   ${C_WHITE}${uuid}${C_RESET}"
-        echo -e "${C_CYAN}│${C_RESET} EXPIRY: ${C_WHITE}${expiry} (${dl_display})${C_RESET}"
-        echo -e "${C_CYAN}│${C_RESET} BW:     ${bw_display}"
-        echo -e "${C_CYAN}│${C_RESET} STATUS: ${st_color}${st_display}${C_RESET}"
+        printf "${C_CYAN}│${C_RESET} USER:   ${C_WHITE}%-51s${C_CYAN}│${C_RESET}\n" "$user"
+        printf "${C_CYAN}│${C_RESET} UUID:   ${C_WHITE}%-51s${C_CYAN}│${C_RESET}\n" "$uuid"
+        printf "${C_CYAN}│${C_RESET} EXPIRY: ${C_WHITE}%-51s${C_CYAN}│${C_RESET}\n" "$expiry ($dl_display)"
+        printf "${C_CYAN}│${C_RESET} BW:     %-51b${C_CYAN}│${C_RESET}\n" "$bw_display"
+        printf "${C_CYAN}│${C_RESET} STATUS: ${st_color}%-51s${C_RESET}${C_CYAN}│${C_RESET}\n" "$st_display"
         echo -e "${C_CYAN}└─────────────────────────────────────────────────────────────┘${C_RESET}"
     done < "$V2RAY_USERS_DB"
 
@@ -971,7 +1451,6 @@ list_v2ray_users() {
     press_enter
 }
 
-# ============ LOCK ============
 lock_v2ray_user() {
     clear; show_banner
     echo -e "${C_BOLD}${C_PURPLE}--- 🔒 Lock V2Ray User ---${C_RESET}\n"
@@ -1007,7 +1486,6 @@ lock_v2ray_user() {
     press_enter
 }
 
-# ============ UNLOCK ============
 unlock_v2ray_user() {
     clear; show_banner
     echo -e "${C_BOLD}${C_PURPLE}--- 🔓 Unlock V2Ray User ---${C_RESET}\n"
@@ -1043,7 +1521,6 @@ unlock_v2ray_user() {
     press_enter
 }
 
-# ============ RENEW ============
 renew_v2ray_user() {
     clear; show_banner
     echo -e "${C_BOLD}${C_PURPLE}--- 🔄 Renew V2Ray User ---${C_RESET}\n"
@@ -1090,7 +1567,6 @@ renew_v2ray_user() {
     press_enter
 }
 
-# ============ CLEANUP ============
 cleanup_expired_v2ray() {
     clear; show_banner
     echo -e "${C_BOLD}${C_PURPLE}--- 🧹 Cleanup Expired V2Ray Users ---${C_RESET}\n"
@@ -1121,7 +1597,6 @@ cleanup_expired_v2ray() {
     press_enter
 }
 
-# ============ BULK CREATE ============
 bulk_create_v2ray() {
     clear; show_banner
     echo -e "${C_BOLD}${C_PURPLE}--- 📦 Bulk Create V2Ray Users ---${C_RESET}\n"
@@ -1154,7 +1629,6 @@ bulk_create_v2ray() {
     press_enter
 }
 
-# ============ VIEW BANDWIDTH (WIMA — box kwa kila user) ============
 view_v2ray_bandwidth() {
     clear; show_banner
     echo -e "${C_BOLD}${C_PURPLE}--- 📊 V2Ray Bandwidth ---${C_RESET}\n"
@@ -1167,12 +1641,11 @@ view_v2ray_bandwidth() {
         [[ -z "$user" ]] && continue
 
         local ub=0
-        [[ -f "$BANDWIDTH_DIR/v2ray_${user}.usage" ]] && ub=$(cat "$BANDWIDTH_DIR/v2ray_${user}.usage" 2>/dev/null | tr -d '[:space:]')
+        [[ -f "$BANDWIDTH_DIR/v2ray_${user}.usage" ]] && \
+            ub=$(tr -d '[:space:]' < "$BANDWIDTH_DIR/v2ray_${user}.usage" 2>/dev/null)
         [[ ! "$ub" =~ ^[0-9]+$ ]] && ub=0
 
-        local bw_display=""
-        local used_limit_disp=""
-
+        local bw_display="" used_limit_disp=""
         if [[ "$bw" == "0" || -z "$bw" ]]; then
             bw_display="${C_GREEN}Unlimited ∞${C_RESET}"
             used_limit_disp="$(format_size "$ub") / ∞"
@@ -1194,11 +1667,11 @@ view_v2ray_bandwidth() {
         local st=$(get_v2ray_status "$user")
         local st_display=""
         case "$st" in
-            ACTIVE)    st_display="${C_GREEN}ACTIVE ✅${C_RESET}" ;;
-            LOCKED)    st_display="${C_RED}LOCKED 🔒${C_RESET}" ;;
-            EXPIRED)   st_display="${C_ORANGE}EXPIRED 🗓️${C_RESET}" ;;
-            EXHAUSTED) st_display="${C_ORANGE}EXHAUSTED 📦${C_RESET}" ;;
-            *)         st_display="${C_GRAY}UNKNOWN ❓${C_RESET}" ;;
+            ACTIVE)    st_display="${C_GREEN}✅ ACTIVE${C_RESET}" ;;
+            LOCKED)    st_display="${C_RED}🔒 LOCKED${C_RESET}" ;;
+            EXPIRED)   st_display="${C_ORANGE}🗓️ EXPIRED${C_RESET}" ;;
+            EXHAUSTED) st_display="${C_ORANGE}📦 EXHAUSTED${C_RESET}" ;;
+            *)         st_display="${C_GRAY}❓ UNKNOWN${C_RESET}" ;;
         esac
 
         echo -e "${C_CYAN}┌─────────────────────────────────────────────────────────────┐${C_RESET}"
@@ -1212,7 +1685,6 @@ view_v2ray_bandwidth() {
     press_enter
 }
 
-# ============ CLIENT CONFIG ============
 show_v2ray_client_config() {
     clear; show_banner
     echo -e "${C_BOLD}${C_PURPLE}--- 📱 V2Ray Client Config ---${C_RESET}\n"
@@ -1268,10 +1740,10 @@ show_v2ray_client_config() {
         trojan) echo -e "  ${C_DIM}trojan://$uuid@127.0.0.1:$V2RAY_PORT#$username${C_RESET}" ;;
     esac
 
-    echo -e "\n${C_ORANGE}⚠️  HATUA MUHIMU:${C_RESET}"
+    echo -e "\n${C_ORANGE}⚠️  IMPORTANT:${C_RESET}"
     echo -e "  1. Nekobox → Outbound → SOCKS5 127.0.0.1:1080"
     echo -e "  2. Nekobox → Routing → 127.0.0.1/32 → Direct"
-    echo -e "  3. Washa SlipNet KWANZA, kisha Nekobox\n"
+    echo -e "  3. Start SlipNet FIRST, then Nekobox\n"
 
     echo -e "${C_CYAN}📅 Expiry    : ${C_YELLOW}$expiry${C_RESET}"
     echo -e "${C_CYAN}📶 Limit     : ${C_YELLOW}$limit${C_RESET}"
@@ -1282,7 +1754,7 @@ show_v2ray_client_config() {
 }
 
 # ============================================================
-# V2RAY TRIAL ACCOUNT
+# V2RAY TRIAL
 # ============================================================
 setup_trial_cleanup_script() {
     cat > "$TRIAL_CLEANUP_SCRIPT" << 'TREOF'
@@ -1317,9 +1789,7 @@ create_trial_v2ray() {
     echo -e "\n  ${C_RED}[0]${C_RESET} Cancel"
     read -p "👉 Choice: " dur_choice
 
-    local duration_hours=0
-    local duration_label=""
-
+    local duration_hours=0 duration_label=""
     case $dur_choice in
         1) duration_hours=1; duration_label="1 Hour" ;;
         2) duration_hours=2; duration_label="2 Hours" ;;
@@ -1373,98 +1843,8 @@ create_trial_v2ray() {
 }
 
 # ============================================================
-# V2RAY DYNAMIC BANNER
+# V2RAY BANNER MENU
 # ============================================================
-create_v2ray_banner_builder() {
-    cat > "$BANNER_BUILDER" << 'BBEOF'
-#!/bin/bash
-user="$1"
-expiry="$2"
-bandwidth_gb="$3"
-status="$4"
-status_color="$5"
-traffic="$6"
-
-BANDWIDTH_DIR="/etc/dnstt-v2ray/bandwidth"
-
-format_size() {
-    local bytes=$1
-    [[ "$bytes" =~ ^[0-9]+$ ]] || bytes=0
-    if (( bytes >= 1073741824 )); then
-        awk "BEGIN{printf \"%.2f GB\", $bytes/1073741824}"
-    elif (( bytes >= 1048576 )); then
-        awk "BEGIN{printf \"%.2f MB\", $bytes/1048576}"
-    elif (( bytes >= 1024 )); then
-        awk "BEGIN{printf \"%.2f KB\", $bytes/1024}"
-    else
-        echo "${bytes} B"
-    fi
-}
-
-bw_info=""
-if [[ "$bandwidth_gb" == "0" || -z "$bandwidth_gb" ]]; then
-    bw_info="Unlimited"
-else
-    ub=0
-    usage_file="$BANDWIDTH_DIR/v2ray_${user}.usage"
-    [[ -f "$usage_file" ]] && ub=$(cat "$usage_file" 2>/dev/null | tr -d '[:space:]')
-    [[ ! "$ub" =~ ^[0-9]+$ ]] && ub=0
-
-    limit_bytes=$(awk "BEGIN{printf \"%.0f\", $bandwidth_gb*1073741824}")
-    [[ "$limit_bytes" -le 0 ]] && limit_bytes=1
-    pct=$(awk "BEGIN{printf \"%.1f\", ($ub/$limit_bytes)*100}")
-    pct_int=$(awk "BEGIN{printf \"%d\", $pct}")
-    [[ "$pct_int" -gt 100 ]] && pct_int=100
-    [[ "$pct_int" -lt 0 ]] && pct_int=0
-
-    used_disp=$(format_size "$ub")
-    limit_disp=$(format_size "$limit_bytes")
-
-    total_blocks=10
-    filled=$((pct_int * total_blocks / 100))
-    bar=""
-    for ((i=0; i<filled; i++)); do bar+="█"; done
-    for ((i=filled; i<total_blocks; i++)); do bar+="░"; done
-
-    bw_info="${bar} ${pct}% | ${used_disp}/${limit_disp}"
-fi
-
-uptime_str=$(uptime -p | sed 's/up //')
-load_str=$(awk '{print $1}' /proc/loadavg)
-
-echo "<br>"
-echo "<center><b>🔷 VOLTRON V2RAY 🔷</b></center><br>"
-echo "<center>👤 Username : <b>$user</b></center><br>"
-echo "<center>📅 Expiry   : <b>$expiry</b></center><br>"
-echo "<center>📊 BW       : $bw_info</center><br>"
-echo "<center>📌 Status   : <font color=\"$status_color\"><b>$status</b></font></center><br>"
-echo "<center>📈 Load     : $load_str</center><br>"
-echo "<center>⏱️  Uptime   : $uptime_str</center><br>"
-BBEOF
-    chmod +x "$BANNER_BUILDER"
-}
-
-generate_v2ray_banner() {
-    local username="$1"
-    local expiry="$2"
-    local bw="$3"
-    local traffic="$4"
-    mkdir -p "$BANNER_DIR"
-
-    local st=$(get_v2ray_status "$username")
-    local st_display=""; local st_color=""
-    case "$st" in
-        ACTIVE)    st_display="ACTIVE ✅"; st_color="#6BCB77" ;;
-        LOCKED)    st_display="LOCKED 🔒"; st_color="#FF6B6B" ;;
-        EXPIRED)   st_display="EXPIRED 🗓️"; st_color="#FF9F43" ;;
-        EXHAUSTED) st_display="EXHAUSTED 📦"; st_color="#FF9F43" ;;
-        *)         st_display="UNKNOWN ❓"; st_color="#888888" ;;
-    esac
-
-    "$BANNER_BUILDER" "$username" "$expiry" "$bw" "$st_display" "$st_color" "$traffic" > "$BANNER_DIR/v2ray_${username}.txt" 2>/dev/null
-    chmod 644 "$BANNER_DIR/v2ray_${username}.txt" 2>/dev/null
-}
-
 v2ray_banner_menu() {
     while true; do
         clear; show_banner
@@ -1485,23 +1865,19 @@ v2ray_banner_menu() {
                 mkdir -p "$BANNER_DIR"
                 touch "$BANNER_ENABLED_FILE"
                 create_v2ray_banner_builder
-                while IFS=: read -r user uuid expiry limit bw traffic status; do
-                    [[ -z "$user" ]] && continue
-                    generate_v2ray_banner "$user" "$expiry" "$bw" "$traffic"
-                done < "$V2RAY_USERS_DB"
+                systemctl restart v2ray-limiter.service 2>/dev/null
                 echo -e "${C_GREEN}✅ Enabled${C_RESET}"; press_enter ;;
-            2) rm -f "$BANNER_ENABLED_FILE"; echo -e "${C_GREEN}✅ Disabled${C_RESET}"; press_enter ;;
+            2)
+                rm -f "$BANNER_ENABLED_FILE"
+                echo -e "${C_GREEN}✅ Disabled${C_RESET}"; press_enter ;;
             3)
                 create_v2ray_banner_builder
-                while IFS=: read -r user uuid expiry limit bw traffic status; do
-                    [[ -z "$user" ]] && continue
-                    generate_v2ray_banner "$user" "$expiry" "$bw" "$traffic"
-                done < "$V2RAY_USERS_DB"
+                systemctl restart v2ray-limiter.service 2>/dev/null
                 echo -e "${C_GREEN}✅ Refreshed${C_RESET}"; press_enter ;;
             4)
                 _select_v2ray_user_interface "--- Preview Banner ---"
                 local u=$SELECTED_USER
-                [[ -z "$u" || "$u" == "NO_USERS" ]] && return
+                [[ -z "$u" || "$u" == "NO_USERS" ]] && { press_enter; return; }
                 [[ -f "$BANNER_DIR/v2ray_${u}.txt" ]] && cat "$BANNER_DIR/v2ray_${u}.txt" || echo "Not found"
                 press_enter ;;
             0) return ;;
@@ -1510,113 +1886,16 @@ v2ray_banner_menu() {
 }
 
 # ============================================================
-# V2RAY LIMITER (FIXED — Wants= badala ya Requires=)
-# ============================================================
-create_v2ray_limiter() {
-    cat > "$V2RAY_LIMITER_SCRIPT" <<'LIMEOF'
-#!/bin/bash
-DB_FILE="/etc/dnstt-v2ray/v2ray_users.db"
-BW_DIR="/etc/dnstt-v2ray/bandwidth"
-V2RAY_CONFIG="/etc/dnstt-v2ray/v2ray/config.json"
-XRAY_BIN="/usr/local/bin/xray"
-XRAY_API="127.0.0.1:10085"
-SCAN=15
-CONFIG_DIRTY="/tmp/v2ray-config-dirty"
-BANNER_ENABLED="/etc/dnstt-v2ray/banners_enabled"
-BANNER_BUILDER="/usr/local/bin/v2ray-banner-build.sh"
-
-mkdir -p "$BW_DIR"
-
-while true; do
-    [[ ! -s "$DB_FILE" ]] && { sleep $SCAN; continue; }
-
-    # Kagua Xray API inafanya kazi
-    if ! ss -tlnp 2>/dev/null | grep -q "127.0.0.1:10085"; then
-        sleep $SCAN
-        continue
-    fi
-
-    while IFS=: read -r user uuid expiry limit bw traffic status; do
-        [[ -z "$user" || "$user" == \#* ]] && continue
-
-        local email="${user}@dnstt"
-
-        local uplink=$("$XRAY_BIN" api statsquery --server=$XRAY_API \
-            -pattern "user>>>$email>>>traffic>>>uplink" 2>/dev/null | \
-            grep -oP '"value":\s*\K[0-9]+' | head -1)
-        local downlink=$("$XRAY_BIN" api statsquery --server=$XRAY_API \
-            -pattern "user>>>$email>>>traffic>>>downlink" 2>/dev/null | \
-            grep -oP '"value":\s*\K[0-9]+' | head -1)
-
-        [[ -z "$uplink" ]] && uplink=0
-        [[ -z "$downlink" ]] && downlink=0
-
-        local total=$((uplink + downlink))
-        local total_gb=$(awk "BEGIN{printf \"%.4f\", $total/1073741824}")
-
-        awk -F: -v u="$user" -v t="$total_gb" \
-            'BEGIN{OFS=":"} $1==u{$6=t}1' "$DB_FILE" > "$DB_FILE.tmp" && \
-            mv "$DB_FILE.tmp" "$DB_FILE"
-
-        printf "%s\n" "$total" > "$BW_DIR/v2ray_${user}.usage"
-
-        if [[ "$bw" != "0" && -n "$bw" ]]; then
-            local qb=$(awk "BEGIN{printf \"%.0f\", $bw*1073741824}")
-            if (( total >= qb )) && [[ "$status" != "EXHAUSTED" ]]; then
-                awk -F: -v u="$user" \
-                    'BEGIN{OFS=":"} $1==u{$7="EXHAUSTED"}1' "$DB_FILE" > "$DB_FILE.tmp" && \
-                    mv "$DB_FILE.tmp" "$DB_FILE"
-            fi
-        fi
-
-        local et=$(date -d "$expiry" +%s 2>/dev/null || echo 0)
-        if [[ $et -gt 0 && $et -lt $(date +%s) ]] && [[ "$status" != "EXPIRED" ]]; then
-            awk -F: -v u="$user" \
-                'BEGIN{OFS=":"} $1==u{$7="EXPIRED"}1' "$DB_FILE" > "$DB_FILE.tmp" && \
-                mv "$DB_FILE.tmp" "$DB_FILE"
-        fi
-
-        if [[ -f "$BANNER_ENABLED" && -x "$BANNER_BUILDER" ]]; then
-            "$BANNER_BUILDER" "$user" "$expiry" "$bw" "$status" "$dirty" "$total_gb" > "/etc/dnstt-v2ray/banners/v2ray_${user}.txt" 2>/dev/null
-        fi
-    done < "$DB_FILE"
-
-    sleep $SCAN
-done
-LIMEOF
-    chmod +x "$V2RAY_LIMITER_SCRIPT"
-
-    cat > "$V2RAY_LIMITER_SERVICE" <<EOF
-[Unit]
-Description=V2Ray Limiter (Xray Stats API)
-After=network.target v2ray-dnstt.service
-Wants=v2ray-dnstt.service
-
-[Service]
-Type=simple
-ExecStart=$V2RAY_LIMITER_SCRIPT
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    systemctl daemon-reload
-    systemctl enable v2ray-limiter.service >/dev/null 2>&1
-    systemctl restart v2ray-limiter.service >/dev/null 2>&1
-}
-
-# ============================================================
 # DNSTT CORE
 # ============================================================
 download_dnstt_binary() {
     local arch=$(uname -m)
     if [[ "$arch" == "x86_64" ]]; then
-        curl -sL "https://dnstt.network/dnstt-server-linux-amd64" -o "$DNSTT_BINARY"
-        curl -sL "https://dnstt.network/dnstt-client-linux-amd64" -o "$DNSTT_CLIENT"
+        curl -fsL "https://dnstt.network/dnstt-server-linux-amd64" -o "$DNSTT_BINARY" || return 1
+        curl -fsL "https://dnstt.network/dnstt-client-linux-amd64" -o "$DNSTT_CLIENT" || return 1
     elif [[ "$arch" == "aarch64" || "$arch" == "arm64" ]]; then
-        curl -sL "https://dnstt.network/dnstt-server-linux-arm64" -o "$DNSTT_BINARY"
-        curl -sL "https://dnstt.network/dnstt-client-linux-arm64" -o "$DNSTT_CLIENT"
+        curl -fsL "https://dnstt.network/dnstt-server-linux-arm64" -o "$DNSTT_BINARY" || return 1
+        curl -fsL "https://dnstt.network/dnstt-client-linux-arm64" -o "$DNSTT_CLIENT" || return 1
     else
         echo "❌ Unsupported: $arch"
         return 1
@@ -1692,7 +1971,7 @@ setup_domain() {
             -H "Authorization: Token $DESEC_TOKEN" \
             -H "Content-Type: application/json" \
             --data "[{\"subname\":\"$tun\",\"type\":\"NS\",\"ttl\":3600,\"records\":[\"$ns.$DESEC_DOMAIN.\"]}]")
-        if [[ "${r: -3}" -eq 201 ]]; then
+        if [[ "${r: -3}" =~ ^2[0-9]{2}$ ]]; then
             DOMAIN="$tun.$DESEC_DOMAIN"
             echo -e "${C_GREEN}✅ $DOMAIN${C_RESET}"
         else
@@ -1707,12 +1986,7 @@ setup_domain() {
 create_dnstt_service() {
     local domain=$1 mtu=$2
     mkdir -p "$LOGS_DIR"
-
-    if [ ! -f "$V2RAY_INFO_FILE" ]; then
-        echo -e "${C_RED}❌ V2Ray info haipo.${C_RESET}"
-        return 1
-    fi
-
+    [ ! -f "$V2RAY_INFO_FILE" ] && { echo -e "${C_RED}❌ V2Ray info missing.${C_RESET}"; return 1; }
     source "$V2RAY_INFO_FILE"
     local upstream="127.0.0.1:${V2RAY_PORT}"
     echo -e "${C_GREEN}🔷 Backend: V2Ray ($V2RAY_PROTOCOL) @ $upstream${C_RESET}"
@@ -1721,7 +1995,7 @@ create_dnstt_service() {
 [Unit]
 Description=DNSTT Server (V2Ray Backend)
 After=network.target v2ray-dnstt.service
-Wants=v2ray-dnstt.service
+Requires=v2ray-dnstt.service
 
 [Service]
 Type=simple
@@ -1747,13 +2021,13 @@ save_dnstt_info() {
 configure_dnstt_firewall() {
     echo -e "\n${C_BLUE}🔥 Configuring firewall...${C_RESET}"
     ! command -v iptables &>/dev/null && ff_apt_install iptables iptables-persistent
-    iptables -t nat -F 2>/dev/null
-    iptables -F 2>/dev/null
-    iptables -A INPUT -p udp --dport 53 -j ACCEPT
-    iptables -A OUTPUT -p udp --sport 53 -j ACCEPT
-    iptables -A INPUT -p udp --dport 5300 -j ACCEPT
-    iptables -A OUTPUT -p udp --sport 5300 -j ACCEPT
-    iptables -t nat -A PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300
+    # NOTE: Uses -C to avoid flushing existing rules
+    iptables -C INPUT -p udp --dport 53 -j ACCEPT 2>/dev/null || iptables -A INPUT -p udp --dport 53 -j ACCEPT
+    iptables -C OUTPUT -p udp --sport 53 -j ACCEPT 2>/dev/null || iptables -A OUTPUT -p udp --sport 53 -j ACCEPT
+    iptables -C INPUT -p udp --dport 5300 -j ACCEPT 2>/dev/null || iptables -A INPUT -p udp --dport 5300 -j ACCEPT
+    iptables -C OUTPUT -p udp --sport 5300 -j ACCEPT 2>/dev/null || iptables -A OUTPUT -p udp --sport 5300 -j ACCEPT
+    iptables -t nat -C PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300 2>/dev/null || \
+        iptables -t nat -A PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 5300
     mkdir -p /etc/iptables
     iptables-save > /etc/iptables/rules.v4 2>/dev/null
     echo -e "${C_GREEN}✅ Firewall configured${C_RESET}"
@@ -1771,10 +2045,10 @@ show_client_commands() {
     echo -e "  ${C_CYAN}MTU${C_RESET}           : ${C_YELLOW}$2${C_RESET}"
     echo -e "  ${C_CYAN}Protocol${C_RESET}      : ${C_YELLOW}$V2RAY_PROTOCOL${C_RESET}"
     echo -e "  ${C_CYAN}Port${C_RESET}          : ${C_YELLOW}$V2RAY_PORT${C_RESET} (127.0.0.1)\n"
-    echo -e "  ${C_ORANGE}⚠️  Upande wa mteja:${C_RESET}"
+    echo -e "  ${C_ORANGE}⚠️  Client side:${C_RESET}"
     echo -e "     1. SlipNet → Proxy Only Mode → SOCKS 127.0.0.1:1080"
     echo -e "     2. Nekobox → $V2RAY_PROTOCOL + SOCKS5 outbound"
-    echo -e "     3. SlipNet kwenye bypass ya Nekobox\n"
+    echo -e "     3. SlipNet bypass ya Nekobox\n"
     press_enter
 }
 
@@ -1790,10 +2064,14 @@ install_dnstt() {
     ff_apt_install wget curl openssl bc dnsutils unzip
 
     echo -e "${C_BLUE}[2/6] Download DNSTT binary...${C_RESET}"
-    download_dnstt_binary
+    download_dnstt_binary || { press_enter; return 1; }
 
     echo -e "${C_BLUE}[3/6] V2Ray backend setup...${C_RESET}"
-    setup_v2ray_backend || { echo -e "${C_RED}❌ V2Ray ni lazima.${C_RESET}"; press_enter; return 1; }
+    setup_v2ray_backend || {
+        echo -e "${C_RED}❌ V2Ray ni lazima.${C_RESET}"
+        press_enter
+        return 1
+    }
 
     echo -e "${C_BLUE}[4/6] MTU selection...${C_RESET}"
     mtu_selection_during_install
@@ -1831,7 +2109,7 @@ uninstall_dnstt() {
 }
 
 # ============================================================
-# DNSTT MENUS
+# DNSTT MAIN MENU
 # ============================================================
 dnstt_main_menu() {
     while true; do
@@ -1988,7 +2266,7 @@ change_dnstt_domain() {
         -H "Authorization: Token $DESEC_TOKEN" \
         -H "Content-Type: application/json" \
         --data "[{\"subname\":\"$tun\",\"type\":\"NS\",\"ttl\":3600,\"records\":[\"$ns.$DESEC_DOMAIN.\"]}]")
-    if [[ "${r: -3}" -eq 201 ]]; then
+    if [[ "${r: -3}" =~ ^2[0-9]{2}$ ]]; then
         local nd="$tun.$DESEC_DOMAIN"
         echo "$nd" > "$DB_DIR/domain.txt"
         local m=$(get_current_mtu)
@@ -2049,12 +2327,15 @@ show_dnstt_full_details() {
     source "$V2RAY_INFO_FILE" 2>/dev/null
     local vst=""
     systemctl is-active --quiet v2ray-dnstt.service 2>/dev/null && vst="${C_GREEN}● RUNNING${C_RESET}" || vst="${C_RED}● STOPPED${C_RESET}"
+    local lst=""
+    systemctl is-active --quiet v2ray-limiter.service 2>/dev/null && lst="${C_GREEN}● RUNNING${C_RESET}" || lst="${C_RED}● STOPPED${C_RESET}"
 
     echo -e "${C_PURPLE}═══════════════════════════════════════════════════════════════════${C_RESET}"
     echo -e "${C_PURPLE}                 📊 DNSTT DETAILS${C_RESET}"
     echo -e "${C_PURPLE}═══════════════════════════════════════════════════════════════════${C_RESET}\n"
     echo -e "  ${C_CYAN}DNSTT Status${C_RESET}  : $st"
     echo -e "  ${C_CYAN}V2Ray Status${C_RESET}  : $vst"
+    echo -e "  ${C_CYAN}Limiter${C_RESET}       : $lst"
     echo -e "  ${C_CYAN}Domain${C_RESET}        : ${C_YELLOW}$d${C_RESET}"
     echo -e "  ${C_CYAN}MTU${C_RESET}           : ${C_YELLOW}$m${C_RESET}"
     echo -e "  ${C_CYAN}Backend${C_RESET}       : ${C_GREEN}$V2RAY_PROTOCOL @ 127.0.0.1:$V2RAY_PORT${C_RESET}"
@@ -2073,8 +2354,8 @@ initial_setup() {
     ff_apt_install curl wget bc iptables openssl dnsutils unzip at >/dev/null 2>&1
     mkdir -p "$DB_DIR" "$LOGS_DIR" "$CONFIG_DIR" "$BANDWIDTH_DIR" "$BANNER_DIR" "$DNSTT_KEYS_DIR" "$V2RAY_CONFIG_DIR"
     touch "$DB_FILE" "$V2RAY_USERS_DB"
-    create_v2ray_limiter
     create_v2ray_banner_builder
+    create_v2ray_limiter
     systemctl enable atd &>/dev/null
     systemctl start atd &>/dev/null
     echo -e "${C_GREEN}✅ Setup complete${C_RESET}"
@@ -2255,8 +2536,9 @@ main_menu() {
         systemctl is-active --quiet dnstt 2>/dev/null && d_st="${C_GREEN}●${C_RESET}" || d_st="${C_RED}○${C_RESET}"
         local v_st=""
         systemctl is-active --quiet v2ray-dnstt 2>/dev/null && v_st="${C_GREEN}●${C_RESET}" || v_st="${C_RED}○${C_RESET}"
+        local l_st=""
+        systemctl is-active --quiet v2ray-limiter 2>/dev/null && l_st="${C_GREEN}●${C_RESET}" || l_st="${C_RED}○${C_RESET}"
         local total_users=$(grep -c . "$V2RAY_USERS_DB" 2>/dev/null || echo 0)
-        local active_users=$(get_active_v2ray_clients | grep -o '"id"' | wc -l 2>/dev/null || echo 0)
 
         echo -e "${C_PURPLE}═══════════════════════════════════════════════════════════════════${C_RESET}"
         echo -e "${C_PURPLE}          DNSTT + V2RAY (XRAY) BACKEND - MAIN MENU${C_RESET}"
@@ -2264,9 +2546,9 @@ main_menu() {
 
         echo -e "  ${C_CYAN}📊 Server Status${C_RESET}"
         echo -e "  ${C_BLUE}─────────────────────────────────────────────────────────${C_RESET}"
-        echo -e "  DNSTT  : $d_st      V2Ray : $v_st"
+        echo -e "  DNSTT: $d_st   V2Ray: $v_st   Limiter: $l_st"
         echo -e "  Domain : ${C_YELLOW}$(cat "$DB_DIR/domain.txt" 2>/dev/null || echo 'Not set')${C_RESET}"
-        echo -e "  Users  : ${C_WHITE}$total_users${C_RESET} total | ${C_GREEN}$active_users${C_RESET} active\n"
+        echo -e "  Users  : ${C_WHITE}$total_users${C_RESET}\n"
 
         echo -e "  ${C_PURPLE}🔷 V2RAY USER MANAGEMENT${C_RESET}"
         echo -e "  ${C_BLUE}─────────────────────────────────────────────────────────${C_RESET}"
